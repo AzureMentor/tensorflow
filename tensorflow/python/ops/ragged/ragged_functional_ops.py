@@ -24,10 +24,12 @@ from tensorflow.python.ops import math_ops
 from tensorflow.python.ops.ragged import ragged_config
 from tensorflow.python.ops.ragged import ragged_tensor
 from tensorflow.python.ops.ragged import ragged_util
+from tensorflow.python.util import dispatch
 from tensorflow.python.util.tf_export import tf_export
 
 
 @tf_export("ragged.map_flat_values")
+@dispatch.add_dispatch_support
 def map_flat_values(op, *args, **kwargs):
   """Applies `op` to the values of one or more RaggedTensors.
 
@@ -41,15 +43,13 @@ def map_flat_values(op, *args, **kwargs):
 
   Examples:
 
-  ```python
-  >>> rt = ragged.constant([[1, 2, 3], [], [4, 5], [6]])
-  >>> ragged.map_flat_values(tf.ones_like, rt).eval().tolist()
+  >>> rt = tf.ragged.constant([[1, 2, 3], [], [4, 5], [6]])
+  >>> map_flat_values(tf.ones_like, rt).to_list()
   [[1, 1, 1], [], [1, 1], [1]]
-  >>> ragged.map_flat_values(tf.multiply, rt, rt).eval().tolist()
+  >>> map_flat_values(tf.multiply, rt, rt).to_list()
   [[1, 4, 9], [], [16, 25], [36]]
-  >>> ragged.map_flat_values(tf.add, rt, 5).eval().tolist()
+  >>> map_flat_values(tf.add, rt, 5).to_list()
   [[6, 7, 8], [], [9, 10], [11]]
-  ```
 
   Args:
     op: The operation that should be applied to the RaggedTensor `flat_values`.

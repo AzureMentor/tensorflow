@@ -24,6 +24,7 @@ limitations under the License.
 #include "absl/memory/memory.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
+#include "tensorflow/lite/delegates/gpu/gl/variable.h"
 
 namespace tflite {
 namespace gpu {
@@ -32,11 +33,11 @@ namespace {
 
 class ReLU : public NodeShader {
  public:
-  Status GenerateCode(const GenerationContext& ctx,
-                      GeneratedCode* generated_code) const final {
-    auto attr = absl::any_cast<ReLUAttributes>(ctx.node->operation.attributes);
+  absl::Status GenerateCode(const GenerationContext& ctx,
+                            GeneratedCode* generated_code) const final {
+    const auto& attr = absl::any_cast<const ReLUAttributes&>(ctx.op_attr);
     // clamp(value, min(0, alpha * value), clip)
-    std::vector<UniformParameter> params;
+    std::vector<Variable> params;
     std::string min;
     if (attr.alpha == 0) {
       min = "vec4(0.0)";
@@ -54,13 +55,14 @@ class ReLU : public NodeShader {
     *generated_code = {
         /*parameters=*/std::move(params),
         /*objects=*/{},
+        /*shared_variables=*/{},
         /*workload=*/uint3(),
         /*workgroup=*/uint3(),
         /*source_code=*/std::move(code),
         /*input=*/IOStructure::AUTO,
         /*output=*/IOStructure::AUTO,
     };
-    return OkStatus();
+    return absl::OkStatus();
   }
 };
 

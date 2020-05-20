@@ -24,6 +24,7 @@ limitations under the License.
 #include "absl/memory/memory.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
+#include "tensorflow/lite/delegates/gpu/gl/variable.h"
 
 namespace tflite {
 namespace gpu {
@@ -32,22 +33,19 @@ namespace {
 
 class Slice : public NodeShader {
  public:
-  Status GenerateCode(const GenerationContext& ctx,
-                      GeneratedCode* generated_code) const final {
-    auto output = ctx.graph->FindOutputs(ctx.node->id)[0];
-
-    auto attr =
-        absl::any_cast<const SliceAttributes&>(ctx.node->operation.attributes);
+  absl::Status GenerateCode(const GenerationContext& ctx,
+                            GeneratedCode* generated_code) const final {
+    const auto& attr = absl::any_cast<const SliceAttributes&>(ctx.op_attr);
 
     const int4 channels(attr.starts.c, attr.strides.c, attr.ends.c, 0);
     const int4 heights(attr.starts.h, attr.strides.h, attr.ends.h, 0);
     const int4 widths(attr.starts.w, attr.strides.w, attr.ends.w, 0);
 
-    std::vector<UniformParameter> parameters = {
+    std::vector<Variable> parameters = {
         {"channels", channels},
         {"heights", heights},
         {"widths", widths},
-        {"dst_size", output->tensor.shape.c},
+        {"dst_size", static_cast<int>(ctx.output_shapes[0][3])},
     };
 
     std::string code;
@@ -99,13 +97,14 @@ class Slice : public NodeShader {
     *generated_code = {
         /*parameters=*/std::move(parameters),
         /*objects=*/{},
+        /*shared_variables=*/{},
         /*workload=*/uint3(),
         /*workgroup=*/uint3(),
         /*source_code=*/std::move(code),
         /*input=*/IOStructure::ONLY_DEFINITIONS,
         /*output=*/IOStructure::AUTO,
     };
-    return OkStatus();
+    return absl::OkStatus();
   }
 };
 

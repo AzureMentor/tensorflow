@@ -26,10 +26,12 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import clip_ops
 from tensorflow.python.ops import gen_math_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.util import dispatch
 from tensorflow.python.util.tf_export import tf_export
 
 
 @tf_export('histogram_fixed_width_bins')
+@dispatch.add_dispatch_support
 def histogram_fixed_width_bins(values,
                                value_range,
                                nbins=100,
@@ -55,6 +57,11 @@ def histogram_fixed_width_bins(values,
     A `Tensor` holding the indices of the binned values whose shape matches
     `values`.
 
+  Raises:
+    TypeError: If any unsupported dtype is provided.
+    tf.errors.InvalidArgumentError: If value_range does not
+        satisfy value_range[0] < value_range[1].
+
   Examples:
 
   ```python
@@ -66,7 +73,7 @@ def histogram_fixed_width_bins(values,
   with tf.compat.v1.get_default_session() as sess:
     indices = tf.histogram_fixed_width_bins(new_values, value_range, nbins=5)
     variables.global_variables_initializer().run()
-    sess.run(indices) => [0, 0, 1, 2, 4]
+    sess.run(indices) # [0, 0, 1, 2, 4, 4]
   ```
   """
   with ops.name_scope(name, 'histogram_fixed_width_bins',
@@ -96,6 +103,7 @@ def histogram_fixed_width_bins(values,
 
 
 @tf_export('histogram_fixed_width')
+@dispatch.add_dispatch_support
 def histogram_fixed_width(values,
                           value_range,
                           nbins=100,
@@ -118,6 +126,11 @@ def histogram_fixed_width(values,
 
   Returns:
     A 1-D `Tensor` holding histogram of values.
+
+  Raises:
+    TypeError: If any unsupported dtype is provided.
+    tf.errors.InvalidArgumentError: If value_range does not
+        satisfy value_range[0] < value_range[1].
 
   Examples:
 

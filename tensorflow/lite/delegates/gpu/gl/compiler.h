@@ -18,19 +18,20 @@ limitations under the License.
 
 #include <functional>
 #include <memory>
+#include <unordered_set>
 
+#include "tensorflow/lite/delegates/gpu/common/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/gl/compiler/shader_code.h"
 #include "tensorflow/lite/delegates/gpu/gl/compiler_options.h"
-#include "tensorflow/lite/delegates/gpu/gl/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/gl/node_shader.h"
 
 namespace tflite {
 namespace gpu {
 namespace gl {
 
-using ShaderCodeCallback = std::function<Status(ShaderCode code)>;
+using ShaderCodeCallback = std::function<absl::Status(ShaderCode code)>;
 
 class Compiler {
  public:
@@ -39,8 +40,9 @@ class Compiler {
   // Goes over a graph and generates OpenGL shaders for the given graph.
   // Callback is called for every generated shader. Callback may execute shaders
   // as they come or store them elsewhere to execute later.
-  virtual Status Compile(const GraphFloat32& graph,
-                         const ShaderCodeCallback& callback) = 0;
+  virtual absl::Status Compile(const GraphFloat32& graph,
+                               const std::unordered_set<int>& tflite_graph_io,
+                               const ShaderCodeCallback& callback) = 0;
 };
 
 std::unique_ptr<Compiler> NewCompiler(

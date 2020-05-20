@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include <cstdarg>
+
 #include <gtest/gtest.h>
 #include "tensorflow/lite/interpreter.h"
 #include "tensorflow/lite/kernels/register.h"
@@ -93,6 +94,25 @@ class SymmetricQuantizedPoolingOpModel : public BasePoolingOpModel {
   std::vector<float> GetDequantizedOutput() {
     return Dequantize<int8_t>(ExtractVector<int8_t>(output_), GetScale(output_),
                               GetZeroPoint(output_));
+  }
+};
+
+class SymmetricQuantizedPoolingOpModel16 : public BasePoolingOpModel {
+ public:
+  using BasePoolingOpModel::BasePoolingOpModel;
+
+  void SetInput(std::initializer_list<float> data) {
+    QuantizeAndPopulate<int16_t>(input_, data);
+  }
+
+  void SetInput(const std::vector<float>& data) {
+    QuantizeAndPopulate<int16_t>(input_, data);
+  }
+
+  std::vector<int16_t> GetOutput() { return ExtractVector<int16_t>(output_); }
+  std::vector<float> GetDequantizedOutput() {
+    return Dequantize<int16_t>(ExtractVector<int16_t>(output_),
+                               GetScale(output_), GetZeroPoint(output_));
   }
 };
 
@@ -356,7 +376,6 @@ TEST(QuantizedPoolingOpTest, AveragePoolPaddingValidStride1) {
               ElementsAreArray(ArrayFloatNear({2.75, 5.0, 5.75})));
   EXPECT_THAT(m.GetOutput(), ElementsAreArray({44, 80, 92}));
 }
-
 // Send in a white image, expect a white pixel.
 TEST(QuantizedPoolingOpTest, AveragePoolImageSize16) {
   int image_size = 16;
@@ -400,6 +419,28 @@ TEST(QuantizedPoolingOpTest, AveragePoolLargeDepth) {
                   1. / 32.f)));
 }
 
+// Test quantized AveragePool with int16 input and output. The input is the same
+// as the uint8 test QuantizedPoolingOpTest.AveragePool but with a scale of
+// 1/4096 rather than 1/16.
+TEST(QuantizedPoolingOpTest, SymmetricAveragePool16) {
+  const float ulp = 1.f / 4096.f;
+  SymmetricQuantizedPoolingOpModel16 m(
+      BuiltinOperator_AVERAGE_POOL_2D,
+      /*input=*/{TensorType_INT16, {1, 2, 4, 1}, 0, 16 - ulp},
+      /*filter_width=*/2, /*filter_height=*/2,
+      /*output=*/{TensorType_INT16, {}, 0, 16 - ulp});
+  m.SetInput({
+      0, 6, 2, 4,   //
+      3, 2, 10, 7,  //
+  });
+  m.Invoke();
+
+  EXPECT_THAT(m.GetDequantizedOutput(),
+              ElementsAreArray(ArrayFloatNear({2.75, 5.75})));
+  EXPECT_THAT(m.GetOutput(),
+              ElementsAreArray({(44 - 128) * 256, (92 - 128) * 256}));
+}
+
 // Test quantized AveragePool with int8 input and output. The input is the same
 // as the uint8 test QuantizedPoolingOpTest.AveragePool. The float output is
 // identical to uint8 test and quantized output is identical to uint8 test with
@@ -423,7 +464,6 @@ TEST(QuantizedPoolingOpTest, SymmetricAveragePool) {
               ElementsAreArray(ArrayFloatNear({2.75, 5.75})));
   EXPECT_THAT(m.GetOutput(), ElementsAreArray({44 - 128, 92 - 128}));
 }
-
 // Test quantized AveragePool with int8 input and output. The input is the same
 // as the uint8 test QuantizedPoolingOpTest.AveragePool. The float output is
 // identical to uint8 test and quantized output is identical to uint8 test with
@@ -479,7 +519,6 @@ TEST(QuantizedPoolingOpTest, SymmetricAveragePoolActivationRelu1) {
               ElementsAreArray(ArrayFloatNear({-1.0, -0.75}, 0.0040)));
   EXPECT_THAT(m.GetOutput(), ElementsAreArray({120 - 128, 122 - 128}));
 }
-
 // Test quantized AveragePool with int8 input and output. The input is the same
 // as the uint8 test QuantizedPoolingOpTest.AveragePool. The float output is
 // identical to uint8 test and quantized output is identical to uint8 test with
@@ -558,6 +597,7 @@ TEST(QuantizedPoolingOpTest, SymmetricAveragePoolPaddingValidStride1) {
   EXPECT_THAT(m.GetOutput(), ElementsAreArray({44 - 128, 80 - 128, 92 - 128}));
 }
 
+// This is not accelerated because the filter window is too large
 // Send in a white image and expect a white pixel.
 TEST(QuantizedPoolingOpTest, AveragePoolImageSize17) {
   int image_size = 17;
@@ -861,6 +901,28 @@ TEST(QuantizedInt8PoolingOpTest, MaxPool) {
   EXPECT_THAT(m.GetOutput(), ElementsAreArray({96 - 128, 160 - 128}));
 }
 
+TEST(QuantizedInt8PoolingOpTest16, MaxPool) {
+  // Choose the input ranges carefully so that the dequantized output matches
+  // the results of the float model above.
+  // Input Range[0, 16-(1/4096)] --> [Scale{(1/4096)}, zero_point{-32768}]
+  const float ulp = 1.f / 4096.f;
+  SymmetricQuantizedPoolingOpModel16 m(
+      BuiltinOperator_MAX_POOL_2D,
+      /*input=*/{TensorType_INT16, {1, 2, 4, 1}, 0, 16 - ulp},
+      /*filter_width=*/2, /*filter_height=*/2,
+      /*output=*/{TensorType_INT16, {}, 0, 16 - ulp});
+  m.SetInput({
+      0, 6, 2, 4,   //
+      3, 2, 10, 7,  //
+  });
+  m.Invoke();
+
+  EXPECT_THAT(m.GetDequantizedOutput(),
+              ElementsAreArray(ArrayFloatNear({6, 10})));
+  EXPECT_THAT(m.GetOutput(),
+              ElementsAreArray({(96 - 128) * 256, (160 - 128) * 256}));
+}
+
 TEST(QuantizedInt8PoolingOpTest, MaxPoolActivationRelu) {
   // Choose the input ranges carefully so that the dequantized output matches
   // the results of the float model above.
@@ -1068,7 +1130,8 @@ TEST(FloatPoolingOpTest, L2PoolPaddingSameSlide1) {
   m.Invoke();
   EXPECT_THAT(m.GetOutput(),
               ElementsAreArray(ArrayFloatNear(
-                  {3.5, 6.0, 6.5, 5.70088, 2.54951, 7.2111, 8.63134, 7.0})));
+                  {3.5, 6.0, 6.5, 5.70088, 2.54951, 7.2111, 8.63134, 7.0},
+                  /*max_abs_error=*/1e-4)));
 }
 
 TEST(FloatPoolingOpTest, L2PoolPaddingValidSlide1) {
@@ -1087,9 +1150,3 @@ TEST(FloatPoolingOpTest, L2PoolPaddingValidSlide1) {
 
 }  // namespace
 }  // namespace tflite
-
-int main(int argc, char** argv) {
-  ::tflite::LogToStderr();
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

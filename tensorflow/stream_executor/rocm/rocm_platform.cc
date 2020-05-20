@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/stream_executor/rocm/rocm_platform.h"
 
+#include "absl/base/call_once.h"
 #include "absl/memory/memory.h"
 #include "absl/strings/str_format.h"
 #include "tensorflow/stream_executor/gpu/gpu_driver.h"
@@ -38,8 +39,8 @@ ROCmPlatform::~ROCmPlatform() {}
 void ROCmPlatform::InspectNumaNodes() {
   // To get NUMA node information, we need to create all executors, so we can
   // examine their device descriptions to see their bus assignments.
-  std::once_flag once;
-  std::call_once(once, [&] {
+  absl::once_flag once;
+  absl::call_once(once, [&] {
     StreamExecutorConfig config;
     for (int i = 0; i < VisibleDeviceCount(); i++) {
       config.ordinal = i;
@@ -134,8 +135,9 @@ port::StatusOr<StreamExecutor*> ROCmPlatform::GetExecutor(
 port::StatusOr<std::unique_ptr<StreamExecutor>>
 ROCmPlatform::GetUncachedExecutor(const StreamExecutorConfig& config) {
   auto executor = absl::make_unique<StreamExecutor>(
-      this, absl::make_unique<GpuExecutor>(config.plugin_config));
-  auto init_status = executor->Init(config.ordinal, config.device_options);
+      this, absl::make_unique<GpuExecutor>(config.plugin_config),
+      config.ordinal);
+  auto init_status = executor->Init(config.device_options);
   if (!init_status.ok()) {
     return port::Status{
         port::error::INTERNAL,

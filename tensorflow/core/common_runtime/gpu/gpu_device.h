@@ -55,29 +55,12 @@ class BaseGPUDevice : public LocalDevice {
                 Bytes memory_limit, const DeviceLocality& locality,
                 TfGpuId tf_gpu_id, const string& physical_device_desc,
                 Allocator* gpu_allocator, Allocator* cpu_allocator,
-                bool sync_every_op, int32 max_streams);
+                bool sync_every_op);
 
   ~BaseGPUDevice() override;
 
   // Initialize the device and return the status of initialization.
   Status Init(const SessionOptions& options);
-
-  // GPU devices require the Op Compute method to save a reference to
-  // any temporary tensors that are allocated until the Op execution
-  // completes.
-  bool RequiresRecordingAccessedTensors() const override;
-
-  // GPU kernel execution requires us to use `tracing::ScopedAnnotation()`
-  // rather than `tracing::ScopedActivity()`, in order to relate asynchronously
-  // launched GPU kernels to the OpKernel.
-  bool TraceUsingAnnotations() const { return true; }
-
-  void ConsumeListOfAccessedTensors(
-      DeviceContext* device_context,
-      const TensorReferenceVector& tensor_refs) override;
-
-  Status FillContextMap(const Graph* graph,
-                        DeviceContextMap* device_context_map) override;
 
   void Compute(OpKernel* op_kernel, OpKernelContext* context) override;
 
@@ -142,34 +125,34 @@ class BaseGPUDevice : public LocalDevice {
   friend class GPUDeviceTestHelper;
   struct StreamGroup {
     se::Stream* compute = nullptr;
+#if TENSORFLOW_USE_ROCM
+    se::Stream* nccl = nullptr;
+#endif
     se::Stream* host_to_device = nullptr;
     se::Stream* device_to_host = nullptr;
     gtl::InlinedVector<se::Stream*, 4> device_to_device;
   };
   class StreamGroupFactory;
 
-  gtl::InlinedVector<StreamGroup*, 4> streams_;
+  StreamGroup* stream_;
   mutex scratch_init_mutex_;
-  gtl::InlinedVector<char*, 4> scratch_;
-  std::vector<GPUDeviceContext*> device_contexts_;
+  char* scratch_ = nullptr;
+  GPUDeviceContext* device_context_;
   GpuDeviceInfo* gpu_device_info_ = nullptr;
   mutex trace_mu_;
   TfGpuId tf_gpu_id_;
   const bool sync_every_op_ = false;
-  const int32 max_streams_;
-  std::unique_ptr<EventMgr> em_;
+  EventMgr* em_ = nullptr;
   std::unique_ptr<thread::ThreadPool> thread_pool_;
   std::unique_ptr<GPUKernelTracker> kernel_tracker_;
   int32 pending_cap_ = 0;
   bool timestamped_allocator_ = false;
 
-  // Initialize scractch buffers used by Eigen.
+  // Initialize scratch buffers used by Eigen.
   Status InitScratchBuffers();
 
   void ReinitializeDevice(OpKernelContext* context, PerOpGpuDevice* device,
                           int stream_id, Allocator* allocator);
-
-  void ComputeHelper(OpKernel* op_kernel, OpKernelContext* context);
 
   string ComputeOpKernelDebugString(const OpKernel& op_kernel,
                                     const int& stream_id);
@@ -241,7 +224,7 @@ class GPUKernelTracker {
   // Caller is responsible for ensuring that RecordTerminate() is eventually
   // called with the same counter value.
   void RecordQueued(uint64 queued_count, int weight)
-      EXCLUSIVE_LOCKS_REQUIRED(mu_);
+      TF_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   // Takes a count value returned by RecordQueued and finds the corresponding
   // PendingKernel record in the ring buffer.  Marks the kernel as completed and
@@ -267,7 +250,7 @@ class GPUKernelTracker {
 
   // Yield current thread until number of pending kernels no longer
   // exceeds the cap.
-  void PauseWhilePendingExceeds(int cap) LOCKS_EXCLUDED(mu_) {
+  void PauseWhilePendingExceeds(int cap) TF_LOCKS_EXCLUDED(mu_) {
     mutex_lock l(mu_);
     while (num_pending_ > cap) {
       VLOG(1) << "num_pending_=" << num_pending_ << " cap=" << cap;
@@ -301,20 +284,20 @@ class GPUKernelTracker {
     PendingKernel() : queued_count(0), weight(0), terminated(false) {}
   };
   mutex mu_;
-  int32 mem_since_last_ GUARDED_BY(mu_);
-  int32 ops_since_last_ GUARDED_BY(mu_);
+  int32 mem_since_last_ TF_GUARDED_BY(mu_);
+  int32 ops_since_last_ TF_GUARDED_BY(mu_);
   // Ring buffer of PendingKernel records.
-  std::vector<PendingKernel> pending_kernels_ GUARDED_BY(mu_);
+  std::vector<PendingKernel> pending_kernels_ TF_GUARDED_BY(mu_);
   // Next unused slot in pending_kernels_.
-  int first_available_ GUARDED_BY(mu_) = 0;
+  int first_available_ TF_GUARDED_BY(mu_) = 0;
   // Last completed PendingKernel such that all prior PendingKernels are
   // also completed.  With out-of-order completion there may be a mixture
   // of completed and uncompleted entries between last_completed_ and
   // first_available_.
-  int last_completed_ GUARDED_BY(mu_) = -1;
+  int last_completed_ TF_GUARDED_BY(mu_) = -1;
   // Sum of weights of the outstanding events marking tracked kernels.
-  int num_pending_ GUARDED_BY(mu_) = 0;
-  condition_variable pending_decreased_ GUARDED_BY(mu_);
+  int num_pending_ TF_GUARDED_BY(mu_) = 0;
+  condition_variable pending_decreased_ TF_GUARDED_BY(mu_);
 };
 
 class BaseGPUDeviceFactory : public DeviceFactory {

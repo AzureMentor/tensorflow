@@ -50,6 +50,23 @@ limitations under the License.
 #include "tensorflow/compiler/xla/window_util.h"
 #include "tensorflow/core/lib/core/errors.h"
 
+// Convenient function to cast the provided llvm::Value* using IRBuilder
+// to default address space. This is useful in particular for generating
+// IR for AMDGPU target, as its kernel variables are in address space 5
+// instead of the default address space.
+static llvm::Value* AddrCastToDefault(llvm::Value* arg, llvm::IRBuilder<>& b) {
+  llvm::Type* arg_type = arg->getType();
+  CHECK(arg_type->isPointerTy());
+  if (arg_type->getPointerAddressSpace() != 0) {
+    llvm::Type* generic_arg_type =
+        arg_type->getPointerElementType()->getPointerTo(0);
+    llvm::Value* addrspacecast_arg =
+        b.CreateAddrSpaceCast(arg, generic_arg_type);
+    return addrspacecast_arg;
+  }
+  return arg;
+}
+
 namespace xla {
 
 using llvm_ir::IrName;
@@ -164,8 +181,19 @@ Status IrEmitter::EmitCallToNestedComputation(
     emitted_function = ir_emitter_nested.GetEmittedFunction();
   }
 
-  std::vector<llvm::Value*> arguments(operands.begin(), operands.end());
-  arguments.push_back(output);
+  // Operands are in default address space for non-AMDGPU target.
+  // However for AMDGPU target, addrspacecast alloca variables from
+  // addrspace 5 to addrspace 0 is needed.
+  std::vector<llvm::Value*> arguments;
+  absl::c_transform(
+      operands, std::back_inserter(arguments),
+      [this](llvm::Value* arg) { return AddrCastToDefault(arg, b_); });
+
+  llvm::Value* casted_output = AddrCastToDefault(output, b_);
+  arguments.push_back(casted_output);
+
+  // It is not required to do address space cast because TempBufferBase
+  // is always in addrspace 0.
   arguments.push_back(bindings_.GetTempBufferBase());
   Call(emitted_function, arguments);
 
@@ -177,13 +205,6 @@ bool IrEmitter::MaybeEmitDirectAtomicOperation(
     llvm::Value* source_address) {
   CHECK_EQ(2, computation.num_parameters());
 
-  if (computation.instruction_count() != 3) {
-    // We special-case only computations with one computing instruction for now.
-    // Such computation has exactly three instructions given it has two
-    // parameters.
-    return false;
-  }
-
   HloOpcode root_opcode = computation.root_instruction()->opcode();
   PrimitiveType element_type =
       computation.root_instruction()->shape().element_type();
@@ -191,27 +212,34 @@ bool IrEmitter::MaybeEmitDirectAtomicOperation(
                             element_type == S64 || element_type == U64;
   llvm::Value* source = Load(source_address, "source");
 
-  // kCopy of RHS -> atomic store.
-  if (root_opcode == HloOpcode::kCopy &&
+  // Just passing along RHS -> atomic store.
+  if (computation.instruction_count() == 2 &&
+      root_opcode == HloOpcode::kParameter &&
       (element_type == F32 || is_atomic_integral) &&
-      computation.root_instruction()->operand(0)->opcode() ==
-          HloOpcode::kParameter &&
-      computation.root_instruction()->operand(0)->parameter_number() == 1) {
+      computation.root_instruction()->parameter_number() == 1) {
     llvm::StoreInst* store = Store(source, output_address);
     store->setAtomic(llvm::AtomicOrdering::Unordered);
     // Derive a minimum alignment from the type. The optimizer can increase it
     // later.
-    store->setAlignment(ShapeUtil::ByteSizeOfPrimitiveType(element_type));
+    store->setAlignment(
+        llvm::Align(ShapeUtil::ByteSizeOfPrimitiveType(element_type)));
     return true;
   }
 
+  if (computation.instruction_count() != 3) {
+    // We special-case only computations with one computing instruction for now.
+    // Such computation has exactly three instructions given it has two
+    // parameters.
+    return false;
+  }
+
   if (root_opcode == HloOpcode::kAdd) {
+    llvm::Triple target_triple = llvm::Triple(module_->getTargetTriple());
     // NVPTX supports atomicAdd on F32 and integer types.
-    if (element_type == F32) {
+    if (target_triple.isNVPTX() && element_type == F32) {
       // F32 + F32
-      llvm_ir::EmitCallToIntrinsic(llvm::Intrinsic::nvvm_atomic_load_add_f32,
-                                   {output_address, source},
-                                   {output_address->getType()}, &b_);
+      AtomicRMW(llvm::AtomicRMWInst::FAdd, output_address, source,
+                llvm::AtomicOrdering::SequentiallyConsistent);
       return true;
     }
     if (is_atomic_integral) {
@@ -308,7 +336,6 @@ Status IrEmitter::EmitAtomicOperationUsingCAS(const HloComputation& computation,
   // element_type is the data type for the binary operation.
   llvm::Type* element_type = output_address_type->getPointerElementType();
   int element_size = llvm_ir::GetSizeInBits(element_type);
-  llvm::Type* element_address_type = element_type->getPointerTo();
 
   int atomic_size = (element_size < 32) ? 32 : element_size;
   llvm::Type* atomic_type = b_.getIntNTy(atomic_size);
@@ -318,10 +345,10 @@ Status IrEmitter::EmitAtomicOperationUsingCAS(const HloComputation& computation,
   // cas_old_output_address and cas_new_output_address point to the scratch
   // memory where we store the old and new values for the repeated atomicCAS
   // operations.
-  llvm::Value* cas_old_output_address =
-      Alloca(atomic_type, /*ArraySize=*/nullptr, "cas_old_output_address");
-  llvm::Value* cas_new_output_address =
-      Alloca(atomic_type, /*ArraySize=*/nullptr, "cas_new_output_address");
+  llvm::Value* cas_old_output_address = llvm_ir::EmitAllocaAtFunctionEntry(
+      atomic_type, "cas_old_output_address", &b_);
+  llvm::Value* cas_new_output_address = llvm_ir::EmitAllocaAtFunctionEntry(
+      atomic_type, "cas_new_output_address", &b_);
 
   // Emit preparation code to the preheader.
   llvm::BasicBlock* loop_preheader_bb = b_.GetInsertBlock();
@@ -344,11 +371,19 @@ Status IrEmitter::EmitAtomicOperationUsingCAS(const HloComputation& computation,
         IntToPtr(atomic_memory_address, atomic_address_type);
     binop_output_address =
         Add(PtrToInt(cas_new_output_address, address_int_type), offset);
-    binop_output_address = IntToPtr(binop_output_address, element_address_type);
+    binop_output_address = IntToPtr(
+        binop_output_address,
+        llvm::PointerType::get(
+            element_type,
+            cas_new_output_address->getType()->getPointerAddressSpace()));
   } else {
-    atomic_memory_address = BitCast(output_address, atomic_address_type);
-    binop_output_address =
-        BitCast(cas_new_output_address, element_address_type);
+    atomic_memory_address = b_.CreatePointerBitCastOrAddrSpaceCast(
+        output_address, atomic_address_type);
+    binop_output_address = b_.CreatePointerBitCastOrAddrSpaceCast(
+        cas_new_output_address,
+        llvm::PointerType::get(
+            element_type,
+            cas_new_output_address->getType()->getPointerAddressSpace()));
   }
 
   // Use the value from the memory that atomicCAS operates on to initialize
@@ -655,8 +690,8 @@ Status IrEmitter::HandleFft(HloInstruction* fft) {
 }
 
 Status IrEmitter::HandleAllReduce(HloInstruction* crs) {
-  // TODO(b/33011107): Support cross replica sum on GPU.
-  return Unimplemented("AllReduce is not implemented on GPU.");
+  return Unimplemented(
+      "AllReduce cannot be nested inside of fusion, map, etc.");
 }
 
 Status IrEmitter::HandleParameter(HloInstruction* parameter) {

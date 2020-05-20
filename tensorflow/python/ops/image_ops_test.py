@@ -28,7 +28,6 @@ import time
 import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
-from tensorflow.python.compat import compat
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.python.client import session
 from tensorflow.python.framework import constant_op
@@ -234,13 +233,13 @@ class GrayscaleToRGBTest(test_util.TensorFlowTestCase):
     # tests if an exception is raised if a two dimensional
     # input is used, i.e. the images have shape [height, width]
     with self.cached_session(use_gpu=True):
-      # 2-D input without batch dimension.
-      x_np = np.array([[1, 2]], dtype=np.uint8).reshape([1, 2])
+      # 1-D input without batch dimension.
+      x_np = np.array([[1, 2]], dtype=np.uint8).reshape([2])
 
       x_tf = constant_op.constant(x_np, shape=x_np.shape)
 
       # this is the error message we expect the function to raise
-      err_msg = "A grayscale image must be at least three-dimensional"
+      err_msg = "A grayscale image must be at least two-dimensional"
       with self.assertRaisesRegexp(ValueError, err_msg):
         image_ops.grayscale_to_rgb(x_tf)
 
@@ -1507,10 +1506,9 @@ class PerImageWhiteningTest(test_util.TensorFlowTestCase):
 
   def _NumpyPerImageWhitening(self, x):
     num_pixels = np.prod(x.shape)
-    x2 = np.square(x).astype(np.float32)
     mn = np.mean(x)
-    vr = np.mean(x2) - (mn * mn)
-    stddev = max(math.sqrt(vr), 1.0 / math.sqrt(num_pixels))
+    std = np.std(x)
+    stddev = max(std, 1.0 / math.sqrt(num_pixels))
 
     y = x.astype(np.float32)
     y -= mn
@@ -1520,7 +1518,7 @@ class PerImageWhiteningTest(test_util.TensorFlowTestCase):
   @test_util.run_deprecated_v1
   def testBasic(self):
     x_shape = [13, 9, 3]
-    x_np = np.arange(0, np.prod(x_shape), dtype=np.int32).reshape(x_shape)
+    x_np = np.arange(0, np.prod(x_shape), dtype=np.float32).reshape(x_shape)
     y_np = self._NumpyPerImageWhitening(x_np)
 
     with self.cached_session(use_gpu=True):
@@ -1547,6 +1545,17 @@ class PerImageWhiteningTest(test_util.TensorFlowTestCase):
       whiten_tf = self.evaluate(whiten)
       for w_tf, w_np in zip(whiten_tf, whiten_np):
         self.assertAllClose(w_tf, w_np, atol=1e-4)
+
+  def testPreservesDtype(self):
+    imgs_npu8 = np.random.uniform(0., 255., [2, 5, 5, 3]).astype(np.uint8)
+    imgs_tfu8 = constant_op.constant(imgs_npu8)
+    whiten_tfu8 = image_ops.per_image_standardization(imgs_tfu8)
+    self.assertEqual(whiten_tfu8.dtype, dtypes.uint8)
+
+    imgs_npf16 = np.random.uniform(0., 255., [2, 5, 5, 3]).astype(np.float16)
+    imgs_tff16 = constant_op.constant(imgs_npf16)
+    whiten_tff16 = image_ops.per_image_standardization(imgs_tff16)
+    self.assertEqual(whiten_tff16.dtype, dtypes.float16)
 
 
 class CropToBoundingBoxTest(test_util.TensorFlowTestCase):
@@ -1693,7 +1702,7 @@ class CropToBoundingBoxTest(test_util.TensorFlowTestCase):
           offset_width,
           target_height,
           target_width,
-          "all dims of 'image.shape' must be > 0",
+          "inner 3 dims of 'image.shape' must be > 0",
           use_tensor_inputs_options=[False])
       # Multiple assertion could fail, but the evaluation order is arbitrary.
       # Match gainst generic pattern.
@@ -2032,7 +2041,7 @@ class PadToBoundingBoxTest(test_util.TensorFlowTestCase):
           offset_width,
           target_height,
           target_width,
-          "all dims of 'image.shape' must be > 0",
+          "inner 3 dims of 'image.shape' must be > 0",
           use_tensor_inputs_options=[False])
 
       # The original error message does not contain back slashes. However, they
@@ -2045,7 +2054,7 @@ class PadToBoundingBoxTest(test_util.TensorFlowTestCase):
           offset_width,
           target_height,
           target_width,
-          "all dims of \\'image.shape\\' must be > 0",
+          "inner 3 dims of \\'image.shape\\' must be > 0",
           use_tensor_inputs_options=[True])
 
   @test_util.run_deprecated_v1
@@ -2645,6 +2654,25 @@ class ResizeImagesV2Test(test_util.TensorFlowTestCase):
           cpu_val = self.evaluate(out_op)
         self.assertAllClose(cpu_val, gpu_val, rtol=1e-5, atol=1e-5)
 
+  @test_util.disable_xla("align_corners=False not supported by XLA")
+  def testBfloat16MultipleOps(self):
+    target_height = 8
+    target_width = 12
+    img = np.random.uniform(0, 100, size=(30, 10, 2)).astype(np.float32)
+    img_bf16 = ops.convert_to_tensor(img, dtype="bfloat16")
+    new_size = constant_op.constant([target_height, target_width])
+    img_methods = [
+        image_ops.ResizeMethod.BILINEAR,
+        image_ops.ResizeMethod.NEAREST_NEIGHBOR, image_ops.ResizeMethod.BICUBIC,
+        image_ops.ResizeMethod.AREA
+    ]
+    for method in img_methods:
+      out_op_bf16 = image_ops.resize_images_v2(img_bf16, new_size, method)
+      out_op_f32 = image_ops.resize_images_v2(img, new_size, method)
+      bf16_val = self.evaluate(out_op_bf16)
+      f32_val = self.evaluate(out_op_f32)
+      self.assertAllClose(bf16_val, f32_val, rtol=1e-2, atol=1e-2)
+
   def testCompareBilinear(self):
     if test.is_gpu_available():
       input_shape = [1, 5, 6, 3]
@@ -2703,7 +2731,9 @@ class ResizeImagesV2Test(test_util.TensorFlowTestCase):
       feed_dict = {}
 
     y = image_ops.resize_images(
-        x_tensor, target_max, preserve_aspect_ratio=preserve_aspect_ratio)
+        x_tensor,
+        ops.convert_to_tensor(target_max),
+        preserve_aspect_ratio=preserve_aspect_ratio)
 
     with self.cached_session(use_gpu=True):
       return y.eval(feed_dict=feed_dict)
@@ -2744,11 +2774,17 @@ class ResizeImagesV2Test(test_util.TensorFlowTestCase):
 
   @test_util.run_deprecated_v1
   def testPreserveAspectRatioMultipleImages(self):
-    x_shape = [10, 100, 100, 10]
+    x_shape = [10, 100, 80, 10]
     x = np.random.uniform(size=x_shape)
-
-    self._assertResizeCheckShape(
-        x, x_shape, [250, 250], [10, 250, 250, 10], preserve_aspect_ratio=False)
+    for preserve_aspect_ratio in [True, False]:
+      with self.subTest(preserve_aspect_ratio=preserve_aspect_ratio):
+        expect_shape = [10, 250, 200, 10] if preserve_aspect_ratio \
+            else [10, 250, 250, 10]
+        self._assertResizeCheckShape(
+            x,
+            x_shape, [250, 250],
+            expect_shape,
+            preserve_aspect_ratio=preserve_aspect_ratio)
 
   @test_util.run_deprecated_v1
   def testPreserveAspectRatioNoOp(self):
@@ -3716,7 +3752,7 @@ class ResizeImageWithCropOrPadTest(test_util.TensorFlowTestCase):
           x_shape,
           target_height,
           target_width,
-          "all dims of 'image.shape' must be > 0",
+          "inner 3 dims of 'image.shape' must be > 0",
           use_tensor_inputs_options=[False])
 
       # The original error message does not contain back slashes. However, they
@@ -3727,7 +3763,7 @@ class ResizeImageWithCropOrPadTest(test_util.TensorFlowTestCase):
           x_shape,
           target_height,
           target_width,
-          "all dims of \\'image.shape\\' must be > 0",
+          "inner 3 dims of \\'image.shape\\' must be > 0",
           use_tensor_inputs_options=[True])
 
   @test_util.run_deprecated_v1
@@ -3941,24 +3977,23 @@ class JpegTest(test_util.TensorFlowTestCase):
     # Previous implementation of random_jpeg_quality had a bug.
     # This unit test tests the fixed version, but due to forward compatibility
     # this test can only be done when fixed version is used.
-    if compat.forward_compatible(2019, 4, 4):
-      # Test jpeg quality dynamic randomization.
-      with ops.Graph().as_default(), self.test_session():
-        np.random.seed(7)
-        path = ("tensorflow/core/lib/jpeg/testdata/medium.jpg")
-        jpeg = io_ops.read_file(path)
-        image = image_ops.decode_jpeg(jpeg)
-        random_jpeg_image = image_ops.random_jpeg_quality(image, 40, 100)
-        with self.cached_session(use_gpu=True) as sess:
-          # Test randomization.
-          random_jpeg_images = [sess.run(random_jpeg_image) for _ in range(5)]
-          are_images_equal = []
-          for i in range(1, len(random_jpeg_images)):
-            # Most of them should be different if randomization is occurring
-            # correctly.
-            are_images_equal.append(
-                np.array_equal(random_jpeg_images[0], random_jpeg_images[i]))
-          self.assertFalse(all(are_images_equal))
+    # Test jpeg quality dynamic randomization.
+    with ops.Graph().as_default(), self.test_session():
+      np.random.seed(7)
+      path = ("tensorflow/core/lib/jpeg/testdata/medium.jpg")
+      jpeg = io_ops.read_file(path)
+      image = image_ops.decode_jpeg(jpeg)
+      random_jpeg_image = image_ops.random_jpeg_quality(image, 40, 100)
+      with self.cached_session(use_gpu=True) as sess:
+        # Test randomization.
+        random_jpeg_images = [sess.run(random_jpeg_image) for _ in range(5)]
+        are_images_equal = []
+        for i in range(1, len(random_jpeg_images)):
+          # Most of them should be different if randomization is occurring
+          # correctly.
+          are_images_equal.append(
+              np.array_equal(random_jpeg_images[0], random_jpeg_images[i]))
+        self.assertFalse(all(are_images_equal))
 
   def testAdjustJpegQuality(self):
     # Test if image_ops.adjust_jpeg_quality works when jpeq quality
@@ -3973,6 +4008,15 @@ class JpegTest(test_util.TensorFlowTestCase):
           image, jpeg_quality)
       with self.cached_session(use_gpu=True) as sess:
         sess.run(adjust_jpeg_quality_image)
+
+  @test_util.run_deprecated_v1
+  def testAdjustJpegQualityShape(self):
+    with self.cached_session(use_gpu=True):
+      image = constant_op.constant(
+          np.arange(24, dtype=np.uint8).reshape([2, 4, 3]))
+      adjusted_image = image_ops.adjust_jpeg_quality(image, 80)
+      self.assertListEqual(adjusted_image.shape.as_list(),
+                           [None, None, 3])
 
 
 class PngTest(test_util.TensorFlowTestCase):
@@ -4261,7 +4305,8 @@ class TotalVariationTest(test_util.TensorFlowTestCase):
 
     return a
 
-  def testTotalVariationNumpy(self):
+  # TODO(b/133851381): re-enable this test.
+  def disabledtestTotalVariationNumpy(self):
     """Test the TensorFlow implementation against a numpy implementation.
     The two implementations are very similar so it is possible that both
     have the same bug, which would not be detected by this test. It is
@@ -4381,7 +4426,7 @@ class FormatTest(test_util.TensorFlowTestCase):
 class NonMaxSuppressionTest(test_util.TensorFlowTestCase):
 
   @test_util.run_deprecated_v1
-  def testSelectFromThreeClusters(self):
+  def NonMaxSuppressionTest(self):
     boxes_np = [[0, 0, 1, 1], [0, 0.1, 1, 1.1], [0, -0.1, 1, 0.9],
                 [0, 10, 1, 11], [0, 10.1, 1, 11.1], [0, 100, 1, 101]]
     scores_np = [0.9, 0.75, 0.6, 0.95, 0.5, 0.3]
@@ -4393,8 +4438,8 @@ class NonMaxSuppressionTest(test_util.TensorFlowTestCase):
       max_output_size = constant_op.constant(max_output_size_np)
       iou_threshold = constant_op.constant(iou_threshold_np)
       selected_indices = image_ops.non_max_suppression(
-          boxes, scores, max_output_size, iou_threshold).eval()
-      self.assertAllClose(selected_indices, [3, 0, 5])
+          boxes, scores, max_output_size, iou_threshold)
+      self.assertAllClose(selected_indices.eval(), [3, 0, 5])
 
   @test_util.run_deprecated_v1
   def testInvalidShape(self):
@@ -4411,12 +4456,12 @@ class NonMaxSuppressionTest(test_util.TensorFlowTestCase):
       image_ops.non_max_suppression(boxes, scores, 3, 0.5)
 
     # The boxes is of shape [num_boxes, 4], and the scores is
-    # of shape [num_boxes]. So an error will thrown.
+    # of shape [num_boxes]. So an error will be thrown.
     with self.assertRaisesRegexp(ValueError,
                                  "Dimensions must be equal, but are 1 and 2"):
       boxes = constant_op.constant([[0.0, 0.0, 1.0, 1.0]])
       scores = constant_op.constant([0.9, 0.75])
-      selected_indices = image_ops.non_max_suppression(boxes, scores, 3, 0.5)
+      image_ops.non_max_suppression(boxes, scores, 3, 0.5)
 
     # The scores should be 1D of shape [num_boxes].
     with self.assertRaisesRegexp(ValueError,
@@ -4425,14 +4470,14 @@ class NonMaxSuppressionTest(test_util.TensorFlowTestCase):
       scores = constant_op.constant([[0.9]])
       image_ops.non_max_suppression(boxes, scores, 3, 0.5)
 
-    # The max_output_size should be a scaler (0-D).
+    # The max_output_size should be a scalar (0-D).
     with self.assertRaisesRegexp(ValueError,
                                  "Shape must be rank 0 but is rank 1"):
       boxes = constant_op.constant([[0.0, 0.0, 1.0, 1.0]])
       scores = constant_op.constant([0.9])
       image_ops.non_max_suppression(boxes, scores, [3], 0.5)
 
-    # The iou_threshold should be a scaler (0-D).
+    # The iou_threshold should be a scalar (0-D).
     with self.assertRaisesRegexp(ValueError,
                                  "Shape must be rank 0 but is rank 2"):
       boxes = constant_op.constant([[0.0, 0.0, 1.0, 1.0]])
@@ -4440,6 +4485,8 @@ class NonMaxSuppressionTest(test_util.TensorFlowTestCase):
       image_ops.non_max_suppression(boxes, scores, 3, [[0.5]])
 
   @test_util.run_deprecated_v1
+  @test_util.xla_allow_fallback(
+      "non_max_suppression with dynamic output shape unsupported.")
   def testDataTypes(self):
     # Test case for GitHub issue 20199.
     boxes_np = [[0, 0, 1, 1], [0, 0.1, 1, 1.1], [0, -0.1, 1, 0.9],
@@ -4447,6 +4494,7 @@ class NonMaxSuppressionTest(test_util.TensorFlowTestCase):
     scores_np = [0.9, 0.75, 0.6, 0.95, 0.5, 0.3]
     max_output_size_np = 3
     iou_threshold_np = 0.5
+    score_threshold_np = float("-inf")
     # Note: There are multiple versions of non_max_suppression v2, v3, v4.
     # gen_image_ops.non_max_suppression_v2:
     for dtype in [np.float16, np.float32]:
@@ -4454,37 +4502,92 @@ class NonMaxSuppressionTest(test_util.TensorFlowTestCase):
         boxes = constant_op.constant(boxes_np, dtype=dtype)
         scores = constant_op.constant(scores_np, dtype=dtype)
         max_output_size = constant_op.constant(max_output_size_np)
-        iou_threshold = constant_op.constant(iou_threshold_np)
+        iou_threshold = constant_op.constant(iou_threshold_np, dtype=dtype)
         selected_indices = gen_image_ops.non_max_suppression_v2(
             boxes, scores, max_output_size, iou_threshold).eval()
         self.assertAllClose(selected_indices, [3, 0, 5])
-    # image_ops.non_max_suppression = gen_image_ops.non_max_suppression_v3.
+    # gen_image_ops.non_max_suppression_v3
     for dtype in [np.float16, np.float32]:
       with self.cached_session():
         boxes = constant_op.constant(boxes_np, dtype=dtype)
         scores = constant_op.constant(scores_np, dtype=dtype)
         max_output_size = constant_op.constant(max_output_size_np)
-        iou_threshold = constant_op.constant(iou_threshold_np)
-        selected_indices = image_ops.non_max_suppression(
-            boxes, scores, max_output_size, iou_threshold).eval()
+        iou_threshold = constant_op.constant(iou_threshold_np, dtype=dtype)
+        score_threshold = constant_op.constant(score_threshold_np, dtype=dtype)
+        selected_indices = gen_image_ops.non_max_suppression_v3(
+            boxes, scores, max_output_size, iou_threshold, score_threshold)
+        selected_indices = self.evaluate(selected_indices)
         self.assertAllClose(selected_indices, [3, 0, 5])
     # gen_image_ops.non_max_suppression_v4.
-    score_threshold = float('-inf')
     for dtype in [np.float16, np.float32]:
       with self.cached_session():
         boxes = constant_op.constant(boxes_np, dtype=dtype)
         scores = constant_op.constant(scores_np, dtype=dtype)
         max_output_size = constant_op.constant(max_output_size_np)
-        iou_threshold = constant_op.constant(iou_threshold_np)
+        iou_threshold = constant_op.constant(iou_threshold_np, dtype=dtype)
+        score_threshold = constant_op.constant(score_threshold_np, dtype=dtype)
         selected_indices, _ = gen_image_ops.non_max_suppression_v4(
             boxes, scores, max_output_size, iou_threshold, score_threshold)
         selected_indices = self.evaluate(selected_indices)
         self.assertAllClose(selected_indices, [3, 0, 5])
+    # gen_image_ops.non_max_suppression_v5.
+    soft_nms_sigma_np = float(0.0)
+    for dtype in [np.float16, np.float32]:
+      with self.cached_session():
+        boxes = constant_op.constant(boxes_np, dtype=dtype)
+        scores = constant_op.constant(scores_np, dtype=dtype)
+        max_output_size = constant_op.constant(max_output_size_np)
+        iou_threshold = constant_op.constant(iou_threshold_np, dtype=dtype)
+        score_threshold = constant_op.constant(score_threshold_np, dtype=dtype)
+        soft_nms_sigma = constant_op.constant(soft_nms_sigma_np, dtype=dtype)
+        selected_indices, _, _ = gen_image_ops.non_max_suppression_v5(
+            boxes, scores, max_output_size, iou_threshold, score_threshold,
+            soft_nms_sigma)
+        selected_indices = self.evaluate(selected_indices)
+        self.assertAllClose(selected_indices, [3, 0, 5])
+
+
+class NonMaxSuppressionWithScoresTest(test_util.TensorFlowTestCase):
+
+  @test_util.run_deprecated_v1
+  @test_util.xla_allow_fallback(
+      "non_max_suppression with dynamic output shape unsupported.")
+  def testSelectFromThreeClustersWithSoftNMS(self):
+    boxes_np = [[0, 0, 1, 1], [0, 0.1, 1, 1.1], [0, -0.1, 1, 0.9],
+                [0, 10, 1, 11], [0, 10.1, 1, 11.1], [0, 100, 1, 101]]
+    scores_np = [0.9, 0.75, 0.6, 0.95, 0.5, 0.3]
+    max_output_size_np = 6
+    iou_threshold_np = 1.0
+    score_threshold_np = 0.0
+    soft_nms_sigma_np = 0.5
+    boxes = constant_op.constant(boxes_np)
+    scores = constant_op.constant(scores_np)
+    max_output_size = constant_op.constant(max_output_size_np)
+    iou_threshold = constant_op.constant(iou_threshold_np)
+    score_threshold = constant_op.constant(score_threshold_np)
+    soft_nms_sigma = constant_op.constant(soft_nms_sigma_np)
+    selected_indices, selected_scores = \
+        image_ops.non_max_suppression_with_scores(
+            boxes,
+            scores,
+            max_output_size,
+            iou_threshold,
+            score_threshold,
+            soft_nms_sigma)
+    selected_indices, selected_scores = self.evaluate(
+        [selected_indices, selected_scores])
+    self.assertAllClose(selected_indices, [3, 0, 1, 5, 4, 2])
+    self.assertAllClose(selected_scores,
+                        [0.95, 0.9, 0.384, 0.3, 0.256, 0.197],
+                        rtol=1e-2, atol=1e-2)
 
 
 class NonMaxSuppressionPaddedTest(test_util.TensorFlowTestCase):
 
   @test_util.run_deprecated_v1
+  @test_util.disable_xla(
+      "b/141236442: "
+      "non_max_suppression with dynamic output shape unsupported.")
   def testSelectFromThreeClusters(self):
     boxes_np = [[0, 0, 1, 1], [0, 0.1, 1, 1.1], [0, -0.1, 1, 0.9],
                 [0, 10, 1, 11], [0, 10.1, 1, 11.1], [0, 100, 1, 101]]
@@ -4512,12 +4615,15 @@ class NonMaxSuppressionPaddedTest(test_util.TensorFlowTestCase):
     self.assertEqual(selected_indices_padded.shape.is_fully_defined(), True)
     self.assertEqual(selected_indices.shape.is_fully_defined(), False)
     with self.cached_session():
-      self.assertAllClose(selected_indices_padded.eval(), [3, 0, 5, 0, 0])
+      self.assertAllClose(selected_indices_padded.eval(),
+                          [3, 0, 5, 0, 0])
       self.assertEqual(num_valid_padded.eval(), 3)
       self.assertAllClose(selected_indices.eval(), [3, 0, 5])
       self.assertEqual(num_valid.eval(), 3)
 
   @test_util.run_deprecated_v1
+  @test_util.xla_allow_fallback(
+      "non_max_suppression with dynamic output shape unsupported.")
   def testSelectFromContinuousOverLap(self):
     boxes_np = [[0, 0, 1, 1], [0, 0.2, 1, 1.2], [0, 0.4, 1, 1.4],
                 [0, 0.6, 1, 1.6], [0, 0.8, 1, 1.8], [0, 2, 1, 2]]
@@ -4553,11 +4659,11 @@ class NonMaxSuppressionWithOverlapsTest(test_util.TensorFlowTestCase):
         [0.2, 0.0, 1.0],
     ]
     scores_np = [0.7, 0.9, 0.1]
-    max_ouput_size_np = 3
+    max_output_size_np = 3
 
     overlaps = constant_op.constant(overlaps_np)
     scores = constant_op.constant(scores_np)
-    max_output_size = constant_op.constant(max_ouput_size_np)
+    max_output_size = constant_op.constant(max_output_size_np)
     overlap_threshold = 0.6
     score_threshold = 0.4
 
@@ -5008,7 +5114,7 @@ class ImageGradientsTest(test_util.TensorFlowTestCase):
 
 class SobelEdgesTest(test_util.TensorFlowTestCase):
 
-  def testSobelEdges1x2x3x1(self):
+  def disabled_testSobelEdges1x2x3x1(self):
     img = constant_op.constant([[1, 3, 6], [4, 1, 5]],
                                dtype=dtypes.float32, shape=[1, 2, 3, 1])
     expected = np.reshape([[[0, 0], [0, 12], [0, 0]],
@@ -5041,6 +5147,7 @@ class SobelEdgesTest(test_util.TensorFlowTestCase):
       self.assertAllClose(expected_batch, actual_sobel)
 
 
+@test_util.run_all_in_graph_and_eager_modes
 class DecodeImageTest(test_util.TensorFlowTestCase):
 
   def testJpegUint16(self):
@@ -5062,6 +5169,13 @@ class DecodeImageTest(test_util.TensorFlowTestCase):
           image_ops.decode_png(png0, dtype=dtypes.uint16), dtypes.uint16)
       image0, image1 = self.evaluate([image0, image1])
       self.assertAllEqual(image0, image1)
+
+      # NumPy conversions should happen before
+      x = np.random.randint(256, size=(4, 4, 3), dtype=np.uint16)
+      x_str = image_ops_impl.encode_png(x)
+      x_dec = image_ops_impl.decode_image(
+          x_str, channels=3, dtype=dtypes.uint16)
+      self.assertAllEqual(x, x_dec)
 
   def testGifUint16(self):
     with self.cached_session(use_gpu=True) as sess:
@@ -5121,6 +5235,21 @@ class DecodeImageTest(test_util.TensorFlowTestCase):
       image1 = image_ops.convert_image_dtype(image_ops.decode_bmp(bmp0),
                                              dtypes.float32)
       image0, image1 = self.evaluate([image0, image1])
+      self.assertAllEqual(image0, image1)
+
+  def testExpandAnimations(self):
+    with self.cached_session(use_gpu=True) as sess:
+      base = "tensorflow/core/lib/gif/testdata"
+      gif0 = io_ops.read_file(os.path.join(base, "scan.gif"))
+      image0 = image_ops.decode_image(
+          gif0, dtype=dtypes.float32, expand_animations=False)
+      # image_ops.decode_png() handles GIFs and returns 3D tensors
+      animation = image_ops.decode_gif(gif0)
+      first_frame = array_ops.gather(animation, 0)
+      image1 = image_ops.convert_image_dtype(first_frame, dtypes.float32)
+      image0, image1 = self.evaluate([image0, image1])
+      self.assertEqual(len(image0.shape), 3)
+      self.assertAllEqual(list(image0.shape), [40, 20, 3])
       self.assertAllEqual(image0, image1)
 
 

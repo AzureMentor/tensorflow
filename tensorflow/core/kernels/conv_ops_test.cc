@@ -29,6 +29,7 @@ limitations under the License.
 #include "tensorflow/core/kernels/conv_ops_gpu.h"
 #include "tensorflow/core/kernels/ops_testutil.h"
 #include "tensorflow/core/kernels/ops_util.h"
+#include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/test_benchmark.h"
 #include "tensorflow/core/protobuf/rewriter_config.pb.h"
@@ -36,7 +37,7 @@ limitations under the License.
 
 namespace tensorflow {
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 struct ConvParametersPeer {
   template <typename T>
@@ -91,7 +92,7 @@ TEST(ConvParameters, WinogradNonfusedAlgoSize) {
       conv_params_large.ShouldIncludeWinogradNonfusedAlgoPreCudnn7<float>());
 }
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 class FusedResizePadConvOpTest : public OpsTestBase {
  protected:
@@ -1001,6 +1002,10 @@ class FusedConv2DWithBatchNormOpTest : public FusedConv2DOpTest<T> {};
 TYPED_TEST_SUITE_P(FusedConv2DWithBiasOpTest);
 TYPED_TEST_SUITE_P(FusedConv2DWithBatchNormOpTest);
 
+// ROCm does not yet support the _FusedConv2D op,
+// Therefore disable tests that check _FusedConv2D, when building with ROCm
+
+#ifndef TENSORFLOW_USE_ROCM
 // -------------------------------------------------------------------------- //
 // Conv2D + BiasAdd + {Activation}                                            //
 // -------------------------------------------------------------------------- //
@@ -1023,12 +1028,14 @@ TYPED_TEST_P(FusedConv2DWithBiasOpTest, SpatialConvolution) {
   this->VerifyConv2DWithBias(filter_size, filter_count);
 }
 
+#ifndef INTEL_MKL
 TYPED_TEST_P(FusedConv2DWithBiasOpTest, ExplicitPaddingConvolution) {
   const int filter_size = 3;
   const int filter_count = 12;
   this->VerifyConv2DWithBias(filter_size, filter_count,
                              /*explicit_paddings=*/{0, 0, 1, 2, 3, 4, 0, 0});
 }
+#endif
 
 TYPED_TEST_P(FusedConv2DWithBiasOpTest, OneByOneConvolutionAndActivation) {
   const int filter_size = 1;
@@ -1057,6 +1064,7 @@ TYPED_TEST_P(FusedConv2DWithBiasOpTest, SpatialConvolutionAndActivation) {
   }
 }
 
+#ifndef INTEL_MKL
 TYPED_TEST_P(FusedConv2DWithBiasOpTest,
              ExplicitPaddingConvolutionAndActivation) {
   const int filter_size = 3;
@@ -1067,6 +1075,7 @@ TYPED_TEST_P(FusedConv2DWithBiasOpTest,
         /*explicit_paddings=*/{0, 0, 1, 2, 3, 4, 0, 0});
   }
 }
+#endif
 
 // -------------------------------------------------------------------------- //
 // Conv2D + FusedBatchNorm + {Activation}                                     //
@@ -1090,6 +1099,7 @@ TYPED_TEST_P(FusedConv2DWithBatchNormOpTest, SpatialConvolution) {
   this->VerifyConv2DWithBatchNorm(filter_size, filter_count);
 }
 
+#ifndef INTEL_MKL
 TYPED_TEST_P(FusedConv2DWithBatchNormOpTest, ExplicitPaddingConvolution) {
   const int filter_size = 3;
   const int filter_count = 12;
@@ -1097,6 +1107,7 @@ TYPED_TEST_P(FusedConv2DWithBatchNormOpTest, ExplicitPaddingConvolution) {
       filter_size, filter_count,
       /*explicit_paddings=*/{0, 0, 1, 2, 3, 4, 0, 0});
 }
+#endif
 
 TYPED_TEST_P(FusedConv2DWithBatchNormOpTest, OneByOneConvolutionAndActivation) {
   const int filter_size = 1;
@@ -1126,6 +1137,7 @@ TYPED_TEST_P(FusedConv2DWithBatchNormOpTest, SpatialConvolutionAndActivation) {
   }
 }
 
+#ifndef INTEL_MKL
 TYPED_TEST_P(FusedConv2DWithBatchNormOpTest,
              ExplicitPaddingConvolutionAndActivation) {
   const int filter_size = 3;
@@ -1136,33 +1148,49 @@ TYPED_TEST_P(FusedConv2DWithBatchNormOpTest,
         /*explicit_paddings=*/{0, 0, 1, 2, 3, 4, 0, 0});
   }
 }
+#endif
 
-REGISTER_TYPED_TEST_SUITE_P(FusedConv2DWithBiasOpTest,          //
-                            OneByOneConvolution,                //
-                            ImageSizeConvolution,               //
-                            SpatialConvolution,                 //
-                            ExplicitPaddingConvolution,         //
+REGISTER_TYPED_TEST_SUITE_P(FusedConv2DWithBiasOpTest,  //
+                            OneByOneConvolution,        //
+                            ImageSizeConvolution,       //
+                            SpatialConvolution,         //
+#ifndef INTEL_MKL
+                            ExplicitPaddingConvolution,  //
+#endif
                             OneByOneConvolutionAndActivation,   //
                             ImageSizeConvolutionAndActivation,  //
-                            SpatialConvolutionAndActivation,    //
+#ifndef INTEL_MKL
+                            SpatialConvolutionAndActivation,  //
                             ExplicitPaddingConvolutionAndActivation);
+#else
+                            SpatialConvolutionAndActivation);
+#endif
 
-REGISTER_TYPED_TEST_SUITE_P(FusedConv2DWithBatchNormOpTest,     //
-                            OneByOneConvolution,                //
-                            ImageSizeConvolution,               //
-                            SpatialConvolution,                 //
-                            ExplicitPaddingConvolution,         //
+REGISTER_TYPED_TEST_SUITE_P(FusedConv2DWithBatchNormOpTest,  //
+                            OneByOneConvolution,             //
+                            ImageSizeConvolution,            //
+                            SpatialConvolution,              //
+#ifndef INTEL_MKL
+                            ExplicitPaddingConvolution,  //
+#endif
                             OneByOneConvolutionAndActivation,   //
                             ImageSizeConvolutionAndActivation,  //
-                            SpatialConvolutionAndActivation,    //
+#ifndef INTEL_MKL
+                            SpatialConvolutionAndActivation,  //
                             ExplicitPaddingConvolutionAndActivation);
+#else
+                            SpatialConvolutionAndActivation);
+#endif
 
 using FusedBiasAddDataTypes = ::testing::Types<float, double>;
 INSTANTIATE_TYPED_TEST_SUITE_P(Test, FusedConv2DWithBiasOpTest,
                                FusedBiasAddDataTypes);
 
+#ifndef INTEL_MKL
 using FusedBatchNormDataTypes = ::testing::Types<float>;
 INSTANTIATE_TYPED_TEST_SUITE_P(Test, FusedConv2DWithBatchNormOpTest,
                                FusedBatchNormDataTypes);
+#endif
 
+#endif  // TENSORFLOW_USE_ROCM
 }  // namespace tensorflow

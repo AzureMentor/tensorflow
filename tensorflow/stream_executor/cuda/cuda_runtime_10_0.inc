@@ -1831,4 +1831,5 @@ extern __host__ cudaError_t CUDARTAPI cudaGetExportTable(
   if (!func_ptr) return GetSymbolNotFoundError();
   return func_ptr(ppExportTable, pExportTableId);
 }
+
 }  // extern "C"

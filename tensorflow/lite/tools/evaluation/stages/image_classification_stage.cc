@@ -14,14 +14,23 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/tools/evaluation/stages/image_classification_stage.h"
 
+#include <algorithm>
+#include <iterator>
+
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_config.pb.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_stages.pb.h"
+#include "tensorflow/lite/tools/evaluation/utils.h"
 
 namespace tflite {
 namespace evaluation {
+namespace {
+// Default cropping fraction value.
+const float kCroppingFraction = 0.875;
+}  // namespace
 
-TfLiteStatus ImageClassificationStage::Init() {
+TfLiteStatus ImageClassificationStage::Init(
+    const DelegateProviders* delegate_providers) {
   // Ensure inference params are provided.
   if (!config_.specification().has_image_classification_params()) {
     LOG(ERROR) << "ImageClassificationParams not provided";
@@ -39,7 +48,8 @@ TfLiteStatus ImageClassificationStage::Init() {
   *tflite_inference_config.mutable_specification()
        ->mutable_tflite_inference_params() = params.inference_params();
   inference_stage_.reset(new TfliteInferenceStage(tflite_inference_config));
-  if (inference_stage_->Init() != kTfLiteOk) return kTfLiteError;
+  if (inference_stage_->Init(delegate_providers) != kTfLiteOk)
+    return kTfLiteError;
 
   // Validate model inputs.
   const TfLiteModelInfo* model_info = inference_stage_->GetModelInfo();
@@ -57,14 +67,16 @@ TfLiteStatus ImageClassificationStage::Init() {
   }
 
   // ImagePreprocessingStage
-  EvaluationStageConfig preprocessing_config;
-  preprocessing_config.set_name("image_preprocessing");
-  auto* preprocess_params = preprocessing_config.mutable_specification()
-                                ->mutable_image_preprocessing_params();
-  preprocess_params->set_image_height(input_shape->data[1]);
-  preprocess_params->set_image_width(input_shape->data[2]);
-  preprocess_params->set_output_type(static_cast<int>(input_type));
-  preprocessing_stage_.reset(new ImagePreprocessingStage(preprocessing_config));
+  if (!config_.specification().has_image_preprocessing_params()) {
+    tflite::evaluation::ImagePreprocessingConfigBuilder builder(
+        "image_preprocessing", input_type);
+    builder.AddCroppingStep(kCroppingFraction, true /*square*/);
+    builder.AddResizingStep(input_shape->data[2], input_shape->data[1], false);
+    builder.AddDefaultNormalizationStep();
+    preprocessing_stage_.reset(new ImagePreprocessingStage(builder.build()));
+  } else {
+    preprocessing_stage_.reset(new ImagePreprocessingStage(config_));
+  }
   if (preprocessing_stage_->Init() != kTfLiteOk) return kTfLiteError;
 
   // TopkAccuracyEvalStage.
@@ -136,6 +148,46 @@ EvaluationStageMetrics ImageClassificationStage::LatestMetrics() {
   }
   metrics.set_num_runs(inference_metrics.num_runs());
   return metrics;
+}
+
+TfLiteStatus FilterBlackListedImages(const std::string& blacklist_file_path,
+                                     std::vector<ImageLabel>* image_labels) {
+  if (!blacklist_file_path.empty()) {
+    std::vector<std::string> lines;
+    if (!tflite::evaluation::ReadFileLines(blacklist_file_path, &lines)) {
+      LOG(ERROR) << "Could not read: " << blacklist_file_path;
+      return kTfLiteError;
+    }
+    std::vector<int> blacklist_ids;
+    blacklist_ids.reserve(lines.size());
+    // Populate blacklist_ids with indices of images.
+    std::transform(lines.begin(), lines.end(),
+                   std::back_inserter(blacklist_ids),
+                   [](const std::string& val) { return std::stoi(val) - 1; });
+
+    std::vector<ImageLabel> filtered_images;
+    std::sort(blacklist_ids.begin(), blacklist_ids.end());
+    const size_t size_post_filtering =
+        image_labels->size() - blacklist_ids.size();
+    filtered_images.reserve(size_post_filtering);
+    int blacklist_index = 0;
+    for (int image_index = 0; image_index < image_labels->size();
+         image_index++) {
+      if (blacklist_index < blacklist_ids.size() &&
+          blacklist_ids[blacklist_index] == image_index) {
+        blacklist_index++;
+        continue;
+      }
+      filtered_images.push_back((*image_labels)[image_index]);
+    }
+
+    if (filtered_images.size() != size_post_filtering) {
+      LOG(ERROR) << "Invalid number of filtered images";
+      return kTfLiteError;
+    }
+    *image_labels = filtered_images;
+  }
+  return kTfLiteOk;
 }
 
 }  // namespace evaluation

@@ -8,19 +8,15 @@
 #   For a user interface walkthrough, see https://www.tensorflow.org/guide/debugger
 # ":grpc_debug_server": Server interface for grpc:// debug URLs.
 
+load("//tensorflow:tensorflow.bzl", "cuda_py_test")
+load("//tensorflow:tensorflow.bzl", "if_not_v2", "if_not_windows", "py_binary", "py_test")
+
 package(
     default_visibility = ["//tensorflow:internal"],
+    licenses = ["notice"],  # Apache 2.0
 )
 
-licenses(["notice"])  # Apache 2.0
-
 exports_files(["LICENSE"])
-
-load("//tensorflow:tensorflow.bzl", "cuda_py_test")
-load("//tensorflow:tensorflow.bzl", "py_test")
-load("//tensorflow:tensorflow.bzl", "py_binary")
-load("//tensorflow:tensorflow.bzl", "if_not_v2")
-load("//tensorflow:tensorflow.bzl", "if_not_windows")
 
 py_library(
     name = "debug_py",
@@ -28,14 +24,21 @@ py_library(
     srcs_version = "PY2AND3",
     visibility = ["//visibility:public"],
     deps = [
+        ":check_numerics_callback",
         ":debug_data",
+        ":debug_events_monitors",
+        ":debug_events_reader",
+        ":debug_events_writer",
         ":debug_gradients",
         ":debug_graphs",
         ":debug_utils",
+        ":dumping_callback",
+        ":dumping_callback_test_lib",
         ":grpc_debug_server",
         ":grpc_debug_test_server",
         ":hooks",
         ":local_cli_wrapper",
+        "//tensorflow/python:debug_ops_gen",
         "//tensorflow/python:util",
     ],
 )
@@ -53,14 +56,96 @@ py_library(
         ":session_debug_testlib",
         ":source_remote",
     ] + if_not_windows([
-        ":debug_examples",
+        ":debug_examples_v1",
+        ":debug_examples_v2",
     ]),
+)
+
+py_library(
+    name = "op_callbacks_common",
+    srcs = ["lib/op_callbacks_common.py"],
+    srcs_version = "PY2AND3",
+)
+
+py_library(
+    name = "check_numerics_callback",
+    srcs = ["lib/check_numerics_callback.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":op_callbacks_common",
+        ":source_utils",
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:debug_ops_gen",
+        "//tensorflow/python:op_callbacks",
+        "//third_party/py/numpy",
+    ],
+)
+
+py_library(
+    name = "dumping_callback",
+    srcs = ["lib/dumping_callback.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":debug_events_writer",
+        ":op_callbacks_common",
+        ":source_utils",
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:debug_ops_gen",
+        "//tensorflow/python:op_callbacks",
+        "//third_party/py/numpy",
+    ],
+)
+
+py_library(
+    name = "dumping_callback_test_lib",
+    srcs = ["lib/dumping_callback_test_lib.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":check_numerics_callback",
+        ":debug_events_reader",
+        ":dumping_callback",
+        "//third_party/py/numpy",
+    ],
 )
 
 py_library(
     name = "common",
     srcs = ["lib/common.py"],
     srcs_version = "PY2AND3",
+)
+
+py_library(
+    name = "debug_events_reader",
+    srcs = ["lib/debug_events_reader.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python:framework",
+        "//tensorflow/python:lib",
+        "@six_archive//:six",
+    ],
+)
+
+py_library(
+    name = "debug_events_monitors",
+    srcs = ["lib/debug_events_monitors.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python:framework",
+        "//tensorflow/python:lib",
+        "//third_party/py/numpy",
+    ],
+)
+
+py_library(
+    name = "debug_events_writer",
+    srcs = ["lib/debug_events_writer.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python:framework",
+    ],
 )
 
 py_library(
@@ -81,6 +166,10 @@ py_library(
     name = "debug_data",
     srcs = ["lib/debug_data.py"],
     srcs_version = "PY2AND3",
+    visibility = [
+        "//tensorflow:internal",
+        "//third_party/py/tf_slim:__subpackages__",
+    ],
     deps = [
         ":debug_graphs",
         "//tensorflow/core:protos_all_py",
@@ -116,6 +205,7 @@ py_library(
 py_binary(
     name = "grpc_tensorflow_server",
     srcs = ["lib/grpc_tensorflow_server.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [":grpc_tensorflow_server_lib"],
 )
@@ -175,6 +265,7 @@ py_library(
     srcs_version = "PY2AND3",
     deps = [
         "//tensorflow/python:platform",
+        "//tensorflow/python:pywrap_tf_session",
         "//third_party/py/numpy",
         "@six_archive//:six",
     ],
@@ -326,6 +417,10 @@ py_library(
     name = "dumping_wrapper",
     srcs = ["wrappers/dumping_wrapper.py"],
     srcs_version = "PY2AND3",
+    visibility = [
+        "//tensorflow:internal",
+        "//third_party/py/tf_slim:__subpackages__",
+    ],
     deps = [
         ":debug_data",
         ":framework",
@@ -367,6 +462,10 @@ py_library(
     name = "hooks",
     srcs = ["wrappers/hooks.py"],
     srcs_version = "PY2AND3",
+    visibility = [
+        "//tensorflow:internal",
+        "//third_party/py/tf_slim:__subpackages__",
+    ],
     deps = [
         ":debug_utils",
         ":dumping_wrapper",
@@ -381,6 +480,7 @@ py_library(
 py_binary(
     name = "offline_analyzer",
     srcs = ["cli/offline_analyzer.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [":offline_analyzer_lib"],
 )
@@ -398,7 +498,7 @@ py_library(
 )
 
 py_library(
-    name = "debug_examples",
+    name = "debug_examples_v1",
     deps = [
         ":debug_errors_lib",
         ":debug_fibonacci_lib",
@@ -409,16 +509,36 @@ py_library(
     ]),
 )
 
+py_library(
+    name = "debug_examples_v2",
+    deps = [
+        ":debug_fibonacci_lib",
+        ":debug_mnist_lib",
+    ],
+)
+
 py_binary(
     name = "debug_fibonacci",
-    srcs = ["examples/debug_fibonacci.py"],
+    srcs = ["examples/v1/debug_fibonacci.py"],
+    python_version = "PY3",
+    srcs_version = "PY2AND3",
+    deps = [":debug_fibonacci_lib"],
+)
+
+py_binary(
+    name = "debug_fibonacci_v2",
+    srcs = ["examples/v2/debug_fibonacci_v2.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [":debug_fibonacci_lib"],
 )
 
 py_library(
     name = "debug_fibonacci_lib",
-    srcs = ["examples/debug_fibonacci.py"],
+    srcs = [
+        "examples/v1/debug_fibonacci.py",
+        "examples/v2/debug_fibonacci_v2.py",
+    ],
     srcs_version = "PY2AND3",
     deps = [
         ":debug_py",
@@ -430,14 +550,15 @@ py_library(
 
 py_binary(
     name = "debug_errors",
-    srcs = ["examples/debug_errors.py"],
+    srcs = ["examples/v1/debug_errors.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [":debug_errors_lib"],
 )
 
 py_library(
     name = "debug_errors_lib",
-    srcs = ["examples/debug_errors.py"],
+    srcs = ["examples/v1/debug_errors.py"],
     srcs_version = "PY2AND3",
     deps = [
         ":debug_py",
@@ -449,31 +570,52 @@ py_library(
 py_binary(
     name = "debug_mnist",
     srcs = ["examples/debug_mnist.py"],
+    python_version = "PY3",
+    srcs_version = "PY2AND3",
+    deps = [":debug_mnist_lib"],
+)
+
+py_binary(
+    name = "debug_mnist_v1",
+    srcs = ["examples/v1/debug_mnist_v1.py"],
+    python_version = "PY3",
+    srcs_version = "PY2AND3",
+    deps = [":debug_mnist_lib"],
+)
+
+py_binary(
+    name = "debug_mnist_v2",
+    srcs = ["examples/v2/debug_mnist_v2.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [":debug_mnist_lib"],
 )
 
 py_library(
     name = "debug_mnist_lib",
-    srcs = ["examples/debug_mnist.py"],
+    srcs = [
+        "examples/debug_mnist.py",
+        "examples/v1/debug_mnist_v1.py",
+        "examples/v2/debug_mnist_v2.py",
+    ],
     srcs_version = "PY2AND3",
     deps = [
         ":debug_py",
         "//tensorflow:tensorflow_py",
-        "//tensorflow/examples/tutorials/mnist:input_data",
     ],
 )
 
 py_binary(
     name = "debug_tflearn_iris",
-    srcs = ["examples/debug_tflearn_iris.py"],
+    srcs = ["examples/v1/debug_tflearn_iris.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [":debug_tflearn_iris_lib"],
 )
 
 py_library(
     name = "debug_tflearn_iris_lib",
-    srcs = ["examples/debug_tflearn_iris.py"],
+    srcs = ["examples/v1/debug_tflearn_iris.py"],
     srcs_version = "PY2AND3",
     deps = [
         ":debug_py",
@@ -484,14 +626,15 @@ py_library(
 
 py_binary(
     name = "debug_keras",
-    srcs = ["examples/debug_keras.py"],
+    srcs = ["examples/v1/debug_keras.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [":debug_keras_lib"],
 )
 
 py_library(
     name = "debug_keras_lib",
-    srcs = ["examples/debug_keras.py"],
+    srcs = ["examples/v1/debug_keras.py"],
     srcs_version = "PY2AND3",
     deps = [
         ":debug_py",
@@ -504,6 +647,7 @@ py_test(
     name = "common_test",
     size = "small",
     srcs = ["lib/common_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":common",
@@ -515,9 +659,51 @@ py_test(
 )
 
 py_test(
+    name = "debug_events_monitors_test",
+    size = "medium",
+    srcs = ["lib/debug_events_monitors_test.py"],
+    python_version = "PY3",
+    srcs_version = "PY2AND3",
+    tags = [
+        "no_windows",  # b/142475891
+    ],
+    deps = [
+        ":debug_events_monitors",
+        ":debug_events_reader",
+        ":debug_events_writer",
+        ":dumping_callback",
+        ":dumping_callback_test_lib",
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:framework_test_lib",
+        "//third_party/py/numpy",
+    ],
+)
+
+py_test(
+    name = "debug_events_writer_test",
+    size = "medium",
+    srcs = ["lib/debug_events_writer_test.py"],
+    python_version = "PY3",
+    srcs_version = "PY2AND3",
+    tags = [
+        "no_windows",  # b/142475891
+    ],
+    deps = [
+        ":debug_events_reader",
+        ":debug_events_writer",
+        ":dumping_callback_test_lib",
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:framework_test_lib",
+    ],
+)
+
+py_test(
     name = "debug_graphs_test",
     size = "small",
     srcs = ["lib/debug_graphs_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":debug_graphs",
@@ -530,6 +716,7 @@ py_test(
     name = "debug_data_test",
     size = "small",
     srcs = ["lib/debug_data_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":debug_data",
@@ -543,10 +730,76 @@ py_test(
 )
 
 cuda_py_test(
+    name = "check_numerics_callback_test",
+    size = "medium",
+    srcs = ["lib/check_numerics_callback_test.py"],
+    python_version = "PY3",
+    tags = ["no_windows"],
+    deps = [
+        ":check_numerics_callback",
+        "//tensorflow/python:framework_test_lib",
+        "//tensorflow/python:math_ops",
+        "//tensorflow/python:platform_test",
+        "//tensorflow/python:variables",
+        "//third_party/py/numpy",
+    ],
+)
+
+cuda_py_test(
+    name = "dumping_callback_test",
+    size = "medium",
+    srcs = ["lib/dumping_callback_test.py"],
+    python_version = "PY3",
+    shard_count = 4,
+    tags = [
+        "no_windows",  # TODO(b/142475891): Enable this test on Windows.
+    ],
+    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
+    deps = [
+        ":debug_events_reader",
+        ":debug_events_writer",
+        ":dumping_callback",
+        ":dumping_callback_test_lib",
+        "//tensorflow/python:framework_test_lib",
+        "//tensorflow/python:math_ops",
+        "//tensorflow/python:platform_test",
+        "//tensorflow/python:variables",
+        "//third_party/py/numpy",
+    ],
+)
+
+cuda_py_test(
+    name = "debug_v2_ops_test",
+    size = "medium",
+    srcs = ["lib/debug_v2_ops_test.py"],
+    python_version = "PY3",
+    tags = [
+        "no_windows",  # b/142475891
+    ],
+    deps = [
+        ":debug_events_reader",
+        ":debug_events_writer",
+        ":dumping_callback_test_lib",
+        "//tensorflow/python:debug_ops_gen",
+        "//tensorflow/python:framework_test_lib",
+        "//tensorflow/python:gradients",
+        "//tensorflow/python:math_ops",
+        "//tensorflow/python:platform_test",
+        "//tensorflow/python:training",
+        "//tensorflow/python:variables",
+        "//tensorflow/python/data/ops:dataset_ops",
+        "//tensorflow/python/keras",
+        "//third_party/py/numpy",
+    ],
+)
+
+cuda_py_test(
     name = "debug_gradients_test",
     size = "small",
     srcs = ["lib/debug_gradients_test.py"],
-    additional_deps = [
+    python_version = "PY3",
+    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
+    deps = [
         ":debug_data",
         ":debug_gradients",
         ":debug_utils",
@@ -558,13 +811,13 @@ cuda_py_test(
         "//tensorflow/python:training",
         "//tensorflow/python:variables",
     ],
-    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
 )
 
 py_test(
     name = "debug_utils_test",
     size = "small",
     srcs = ["lib/debug_utils_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":debug_utils",
@@ -584,7 +837,11 @@ py_test(
     name = "source_utils_test",
     size = "small",
     srcs = ["lib/source_utils_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
+    tags = [
+        "no_windows",
+    ],
     deps = [
         ":debug_data",
         ":debug_utils",
@@ -610,6 +867,7 @@ py_test(
     name = "source_remote_test",
     size = "small",
     srcs = ["lib/source_remote_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     tags = [
         "no_windows",
@@ -636,7 +894,9 @@ py_test(
     name = "framework_test",
     size = "medium",
     srcs = ["wrappers/framework_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
+    tags = ["no_rocm"],
     deps = [
         ":debug_data",
         ":framework",
@@ -660,6 +920,7 @@ py_test(
     name = "profiling_test",
     size = "small",
     srcs = ["lib/profiling_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":profiling",
@@ -673,6 +934,7 @@ py_test(
     name = "curses_ui_test",
     size = "small",
     srcs = ["cli/curses_ui_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     tags = [
         "no_windows",
@@ -693,6 +955,7 @@ py_test(
     name = "readline_ui_test",
     size = "small",
     srcs = ["cli/readline_ui_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":cli_config",
@@ -775,10 +1038,30 @@ py_library(
 )
 
 cuda_py_test(
+    name = "debug_grappler_test",
+    size = "small",
+    srcs = ["lib/debug_grappler_test.py"],
+    python_version = "PY3",
+    xla_enable_strict_auto_jit = False,  # Tests TF:Classic implementation.
+    deps = [
+        ":debug_data",
+        ":debug_utils",
+        "//tensorflow/python:client",
+        "//tensorflow/python:framework_for_generated_wrappers",
+        "//tensorflow/python:math_ops",
+        "//tensorflow/python:platform_test",
+        "//tensorflow/python:variables",
+    ],
+)
+
+cuda_py_test(
     name = "session_debug_file_test",
     size = "small",
     srcs = ["lib/session_debug_file_test.py"],
-    additional_deps = [
+    python_version = "PY3",
+    tags = ["notsan"],
+    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
+    deps = [
         ":debug_data",
         ":debug_utils",
         ":session_debug_testlib",
@@ -788,15 +1071,15 @@ cuda_py_test(
         "//tensorflow/python:platform_test",
         "//tensorflow/python:variables",
     ],
-    tags = ["notsan"],
-    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
 )
 
 cuda_py_test(
     name = "debug_graph_reconstruction_test",
     size = "small",
     srcs = ["lib/debug_graph_reconstruction_test.py"],
-    additional_deps = [
+    python_version = "PY3",
+    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
+    deps = [
         ":debug_data",
         ":debug_utils",
         "//tensorflow/python:client",
@@ -807,14 +1090,16 @@ cuda_py_test(
         "//tensorflow/python:training",
         "//tensorflow/python:variables",
     ],
-    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
 )
 
 cuda_py_test(
     name = "session_debug_multi_gpu_test",
     size = "small",
     srcs = ["lib/session_debug_multi_gpu_test.py"],
-    additional_deps = [
+    python_version = "PY3",
+    tags = ["no_windows_gpu"],
+    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
+    deps = [
         ":debug_data",
         ":debug_utils",
         "//tensorflow/python:client",
@@ -824,20 +1109,21 @@ cuda_py_test(
         "//tensorflow/python:platform_test",
         "//tensorflow/python:variables",
     ],
-    tags = ["no_windows_gpu"],
-    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
 )
 
 py_test(
     name = "debugger_cli_common_test",
     size = "small",
     srcs = ["cli/debugger_cli_common_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
+    tags = ["no_rocm"],
     deps = [
         ":debugger_cli_common",
         "//tensorflow/python:framework_test_lib",
         "//tensorflow/python:platform",
         "//tensorflow/python:platform_test",
+        "//tensorflow/python:pywrap_tf_session",
         "//third_party/py/numpy",
     ],
 )
@@ -846,6 +1132,7 @@ py_test(
     name = "cli_config_test",
     size = "small",
     srcs = ["cli/cli_config_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":cli_config",
@@ -859,6 +1146,7 @@ py_test(
     name = "command_parser_test",
     size = "small",
     srcs = ["cli/command_parser_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":command_parser",
@@ -871,6 +1159,7 @@ py_test(
     name = "tensor_format_test",
     size = "small",
     srcs = ["cli/tensor_format_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":cli_test_utils",
@@ -888,6 +1177,7 @@ py_test(
     name = "cli_shared_test",
     size = "small",
     srcs = ["cli/cli_shared_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":cli_shared",
@@ -907,6 +1197,7 @@ py_test(
     srcs = [
         "cli/evaluator_test.py",
     ],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":debug_data",
@@ -927,7 +1218,10 @@ cuda_py_test(
     name = "analyzer_cli_test",
     size = "small",
     srcs = ["cli/analyzer_cli_test.py"],
-    additional_deps = [
+    python_version = "PY3",
+    tags = ["no_windows"],  # TODO: needs investigation on Windows
+    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
+    deps = [
         ":analyzer_cli",
         ":cli_config",
         ":cli_test_utils",
@@ -936,8 +1230,6 @@ cuda_py_test(
         ":debug_utils",
         ":debugger_cli_common",
         ":source_utils",
-        "//third_party/py/numpy",
-        "@six_archive//:six",
         "//tensorflow:tensorflow_py",
         "//tensorflow/python:array_ops",
         "//tensorflow/python:client",
@@ -949,15 +1241,16 @@ cuda_py_test(
         "//tensorflow/python:platform_test",
         "//tensorflow/python:util",
         "//tensorflow/python:variables",
+        "//third_party/py/numpy",
+        "@six_archive//:six",
     ],
-    tags = ["no_windows"],  # TODO: needs investigation on Windows
-    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
 )
 
 py_test(
     name = "profile_analyzer_cli_test",
     size = "small",
     srcs = ["cli/profile_analyzer_cli_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":debugger_cli_common",
@@ -978,7 +1271,15 @@ cuda_py_test(
     name = "session_debug_grpc_test",
     size = "medium",
     srcs = ["lib/session_debug_grpc_test.py"],
-    additional_deps = [
+    python_version = "PY3",
+    tags = [
+        "no_oss",  # Test flaky due to port collisions.
+        "no_windows",
+        "notsan",
+        "oss_serial",
+    ],
+    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
+    deps = [
         ":debug_data",
         ":debug_utils",
         ":dumping_wrapper",
@@ -993,39 +1294,34 @@ cuda_py_test(
         "//tensorflow/python:platform_test",
         "//tensorflow/python:variables",
     ],
-    tags = [
-        "no_oss",  # Test flaky due to port collisions.
-        "no_windows",
-        "notsan",
-        "oss_serial",
-    ],
-    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
 )
 
 cuda_py_test(
     name = "grpc_large_data_test",
     size = "medium",
     srcs = ["lib/grpc_large_data_test.py"],
-    additional_deps = [
+    python_version = "PY3",
+    tags = [
+        "no_oss",  # Test flaky due to port collisions.
+        "no_windows",
+        "noasan",  # Times out due to size of test (b/73731462).
+        "notap",  # TODO(b/153898535) flaky
+        "optonly",  # Test flaky (b/80130873)
+        "oss_serial",
+    ],
+    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
+    deps = [
         ":dumping_wrapper",
         ":grpc_debug_test_server",
         ":grpc_wrapper",
         ":session_debug_testlib",
-        "//third_party/py/numpy",
         "//tensorflow/python:client",
         "//tensorflow/python:client_testlib",
         "//tensorflow/python:framework_for_generated_wrappers",
         "//tensorflow/python:platform_test",
         "//tensorflow/python:variables",
+        "//third_party/py/numpy",
     ],
-    tags = [
-        "no_oss",  # Test flaky due to port collisions.
-        "no_windows",
-        "noasan",  # Times out due to size of test (b/73731462).
-        "optonly",  # Test flaky (b/80130873)
-        "oss_serial",
-    ],
-    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
 )
 
 # TODO(cais): Run the test in OSS, perhaps through a sh_test.
@@ -1033,7 +1329,15 @@ cuda_py_test(
     name = "dist_session_debug_grpc_test",
     size = "medium",
     srcs = ["lib/dist_session_debug_grpc_test.py"],
-    additional_deps = [
+    grpc_enabled = True,
+    python_version = "PY3",
+    tags = [
+        "no_oss",  # Incompatible with bazel_pip.
+        "no_windows",
+        "notsan",
+    ],
+    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
+    deps = [
         ":debug_data",
         ":debug_utils",
         ":dumping_wrapper",
@@ -1047,20 +1351,13 @@ cuda_py_test(
         "//tensorflow/python:platform_test",
         "//tensorflow/python:variables",
     ],
-    data = [":grpc_tensorflow_server"],
-    grpc_enabled = True,
-    tags = [
-        "no_oss",  # Incompatible with bazel_pip.
-        "no_windows",
-        "notsan",
-    ],
-    xla_enable_strict_auto_jit = False,  # Node names are different with autojit
 )
 
 py_test(
     name = "dumping_wrapper_test",
     size = "small",
     srcs = ["wrappers/dumping_wrapper_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":debug_data",
@@ -1083,6 +1380,7 @@ py_test(
     name = "local_cli_wrapper_test",
     size = "small",
     srcs = ["wrappers/local_cli_wrapper_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":cli_shared",
@@ -1102,6 +1400,7 @@ py_test(
         "//tensorflow/python:state_ops",
         "//tensorflow/python:training",
         "//tensorflow/python:variables",
+        "//tensorflow/python/keras",
         "//third_party/py/numpy",
     ],
 )
@@ -1110,6 +1409,7 @@ py_test(
     name = "disk_usage_test",
     size = "small",
     srcs = ["wrappers/disk_usage_test.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":dumping_wrapper",
@@ -1124,16 +1424,32 @@ py_test(
 )
 
 sh_test(
-    name = "examples_test",
+    name = "examples_v1_test",
     size = "medium",
-    srcs = ["examples/examples_test.sh"],
+    srcs = ["examples/v1/examples_v1_test.sh"],
     data = [
         ":debug_errors",
         ":debug_fibonacci",
         ":debug_keras",
-        ":debug_mnist",
+        ":debug_mnist_v1",
         ":debug_tflearn_iris",
         ":offline_analyzer",
+    ],
+    tags = [
+        "no_windows",
+        "noasan",  # TODO(b/143150907)
+        "nomsan",  # TODO(b/143150907)
+        "v1only",
+    ],
+)
+
+sh_test(
+    name = "examples_v2_test",
+    size = "medium",
+    srcs = ["examples/v2/examples_v2_test.sh"],
+    data = [
+        ":debug_fibonacci_v2",
+        ":debug_mnist_v2",
     ],
     tags = [
         "no_windows",

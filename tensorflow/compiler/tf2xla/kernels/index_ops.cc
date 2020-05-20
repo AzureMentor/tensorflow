@@ -77,7 +77,7 @@ void XlaArgMinMaxOp::Compile(XlaOpKernelContext* ctx) {
     if (is_gpu_) {
       output = xla::ArgMaxTwoPass(input, index_xla_type, axis);
     } else {
-      output = xla::ArgMax(input, index_xla_type, axis);
+      output = xla::ArgMax(input, index_xla_type, axis, /*stable=*/true);
     }
   }
 
@@ -86,9 +86,7 @@ void XlaArgMinMaxOp::Compile(XlaOpKernelContext* ctx) {
 
 XlaArgMaxOp::XlaArgMaxOp(OpKernelConstruction* ctx)
     : XlaArgMinMaxOp(ctx, /*is_min=*/false) {}
-REGISTER_XLA_OP(Name("ArgMax")
-                    .Device(DEVICE_GPU_XLA_JIT)
-                    .CompileTimeConstantInput("dimension"),
+REGISTER_XLA_OP(Name("ArgMax").CompileTimeConstantInput("dimension"),
                 XlaArgMaxOp);
 
 namespace {

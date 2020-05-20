@@ -147,11 +147,17 @@ class XlaCompiler {
     // The name of this argument, used for debugging.
     string name;
 
+    // The name of TensorFlow _Arg node, used for debugging.
+    string node_name;
+
     // For a kResource, what kind of resource is it?
     XlaResource::Kind resource_kind = XlaResource::kInvalid;
 
     // For a kResource, has this resource been initialized?
     bool initialized = false;
+
+    // For a kResource, is this resource on Fast Memory.
+    bool fast_mem = false;
 
     // For a TensorArray or Stack resource, what is the array's declared size?
     // (Used for lazy initialization.)
@@ -176,6 +182,7 @@ class XlaCompiler {
 
     // Returns the dimension sizes for either TensorShape or xla::Shape.
     std::vector<int64> DimensionSizes() const;
+    absl::InlinedVector<int64, 4> DimensionSizesAsInlinedVector() const;
 
     // Returns the human-readable string for either TensorShape or xla::Shape.
     string ShapeHumanString() const;
@@ -195,12 +202,6 @@ class XlaCompiler {
     // the input and output signatures match.
     bool return_updated_values_for_all_resources = false;
 
-    // If 'resolve_compile_time_constants' is true, then outputs of a
-    // computation that are known to be compile-time constants will be returned
-    // as Tensors at compile-time, rather than as run-time outputs of the
-    // computation.
-    bool resolve_compile_time_constants = true;
-
     // If 'always_return_tuple' is true, then the output of a computation will
     // always be a tuple. Otherwise, a single-element output will not be wrapped
     // in a tuple.
@@ -212,6 +213,12 @@ class XlaCompiler {
 
     // True when we should add XLA input & output to the graph/function.
     bool add_token_input_output = false;
+
+    // Resource updates are converted into input / output of xla. The two
+    // buffers are aliased with other if this option is true.
+    //
+    // Currently only supports TPU.
+    bool alias_resource_update = false;
   };
 
   struct OutputDescription {
@@ -286,7 +293,8 @@ class XlaCompiler {
     std::shared_ptr<xla::XlaComputation> computation;
   };
 
-  typedef std::function<xla::StatusOr<xla::Shape>(const TensorShape&, DataType)>
+  typedef std::function<xla::StatusOr<xla::Shape>(const TensorShape&, DataType,
+                                                  bool)>
       ShapeRepresentationFn;
   struct Options {
     // Name of the compilation device to use. It must be set by the caller.
@@ -339,12 +347,20 @@ class XlaCompiler {
     // here, but on some devices (notably, GPUs), TensorFlow tends to eagerly
     // allocate most or all available memory on the device, leaving none for the
     // compiler to access, unless it can use TensorFlow's allocator.
-    xla::DeviceMemoryAllocator* device_allocator = nullptr;
+    se::DeviceMemoryAllocator* device_allocator = nullptr;
+
+    // Alias input and output buffers for parameters that are passed-through XLA
+    // modules without being changed.
+    bool alias_passthrough_params = false;
   };
 
   explicit XlaCompiler(Options options);
 
   ~XlaCompiler();
+
+  // Helper function to populate an XlaCompiler::Argument from XlaResource.
+  static void PopulateArgumentFromResource(const XlaResource& resource,
+                                           Argument* arg);
 
   Status CompileFunction(const CompileOptions& options,
                          const NameAttrList& fn_name_attrs,
@@ -357,22 +373,15 @@ class XlaCompiler {
   Status CompileGraph(
       const CompileOptions& options, string const& name,
       std::unique_ptr<Graph> graph, absl::Span<const Argument> args,
-      absl::Span<const xla::XlaBuilder::InputOutputAlias> user_aliases,
       CompilationResult* result);
-
-  // Compiles a single Op, given by `node_def`, into an
-  // xla::XlaComputation. Similar to CompileFunction but takes a single Op as
-  // input.
-  Status CompileSingleOp(const CompileOptions& options, const NodeDef& node_def,
-                         absl::Span<const Argument> args,
-                         absl::Span<const DataType> result_types,
-                         CompilationResult* result);
 
   // Returns the shape of the XLA parameter for an argument 'arg'.
   // See the class comment for more details about the argument passing
   // convention.
-  Status XLAShapeForArgument(const Argument& arg, bool is_entry_computation,
-                             xla::Shape* xla_shape) const;
+  Status XLAShapeForArgument(
+      const Argument& arg, bool is_entry_computation,
+      const absl::optional<xla::HloSharding>& arg_sharding,
+      xla::Shape* xla_shape) const;
 
   // Retrieves the channel handle associated with `key`. Allocates
   // a new channel handle if none exists.
@@ -446,7 +455,7 @@ class XlaCompiler {
                         const std::vector<XlaCompiler::Argument>& args,
                         bool use_tuple_arg, xla::XlaBuilder* builder,
                         XlaContext* context,
-                        const std::map<int, int>& arg_cores,
+                        const std::map<int, xla::OpSharding>& arg_shardings,
                         std::vector<XlaExpression>* arg_expressions,
                         std::vector<int>* input_to_args,
                         std::vector<xla::Shape>* input_shapes,
@@ -469,7 +478,7 @@ class XlaCompiler {
   int64 next_step_id_;
 
   XlaCompilationDevice* device_;  // Owned by device_mgr_
-  DeviceMgr device_mgr_;
+  StaticDeviceMgr device_mgr_;
 
   // To avoid copying the client's function library, use a local function
   // library and runtime for functions created as part of the functionalize
@@ -508,6 +517,22 @@ class XlaCompiler {
 
   TF_DISALLOW_COPY_AND_ASSIGN(XlaCompiler);
 };
+
+// Creates an identity shape representation function.
+XlaCompiler::ShapeRepresentationFn IdentityShapeRepresentationFn();
+
+// Rewrites the layout of xla_shape if there is tiled sharding.
+Status RewriteLayoutWithShardedShape(
+    const absl::optional<xla::HloSharding>& sharding, bool use_fast_memory,
+    XlaCompiler::ShapeRepresentationFn shape_representation_fn,
+    xla::Shape* xla_shape);
+
+// Adds reshapes to fix the layout of an output, if a shape_representation_fn or
+// sharding is present.
+xla::StatusOr<xla::XlaOp> ReshapeWithCorrectRepresentationAndSharding(
+    xla::XlaBuilder* builder, xla::XlaOp original, xla::Shape original_shape,
+    XlaCompiler::ShapeRepresentationFn shape_representation_fn,
+    absl::optional<xla::OpSharding> sharding, bool fast_mem);
 
 }  // namespace tensorflow
 

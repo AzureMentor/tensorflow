@@ -38,7 +38,6 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 
@@ -105,7 +104,7 @@ void RingGatherer::Run(StatusCallback done) {
     Status status;
     Tensor alias_chunk(ca_->ChunkAlias(col_params_->subdiv_rank[0]));
     CollectiveRemoteAccessLocal::MemCpyAsync(
-        col_ctx_->op_ctx->input_device_context(0),
+        col_ctx_->op_ctx->op_device_context(),
         col_ctx_->op_ctx->op_device_context(), col_ctx_->device,
         col_ctx_->device, col_ctx_->op_ctx->input_alloc_attr(0),
         col_ctx_->op_ctx->output_alloc_attr(0), col_ctx_->input, &alias_chunk,
@@ -273,6 +272,8 @@ bool RingGatherer::RunAsyncParts() {
   return !aborted;
 }
 
+namespace {
 REGISTER_COLLECTIVE(RingGather, RingGatherer);
+}  // namespace
 
 }  // namespace tensorflow

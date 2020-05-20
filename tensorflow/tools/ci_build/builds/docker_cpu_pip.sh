@@ -16,16 +16,26 @@
 set -x
 
 cd bazel_pip
+virtualenv --system-site-packages --python=python .env
+source .env/bin/activate
 pip --version
 pip install portpicker
 pip install *.whl
 
+# Make bazel version the same as the env that invokes this script
+rm -rf ~/bazel
+mkdir ~/bazel
+pushd ~/bazel
+wget https://github.com/bazelbuild/bazel/releases/download/"${BAZEL_VERSION}"/bazel-"${BAZEL_VERSION}"-installer-linux-x86_64.sh
+chmod +x bazel-*.sh
+./bazel-"${BAZEL_VERSION}"-installer-linux-x86_64.sh --user
+rm bazel-"${BAZEL_VERSION}"-installer-linux-x86_64.sh
+PATH="/bazel_pip/bin:$PATH"
+popd
+bazel version
+
 # Use default configuration
 yes "" | python configure.py
-
-# Run as non-root to aviod file permission related test failures.
-useradd -m normal_user
-su normal_user
 
 PIP_TEST_ROOT=pip_test_root
 mkdir -p ${PIP_TEST_ROOT}
@@ -38,4 +48,9 @@ bazel test --define=no_tensorflow_py_deps=true \
       --test_size_filters=small,medium \
       --test_timeout 300,450,1200,3600 \
       --test_output=errors \
-      -- //${PIP_TEST_ROOT}/tensorflow/python/...
+      -- //${PIP_TEST_ROOT}/tensorflow/python/... \
+      -//${PIP_TEST_ROOT}/tensorflow/python:virtual_gpu_test \
+      -//${PIP_TEST_ROOT}/tensorflow/python:virtual_gpu_test_gpu \
+      -//${PIP_TEST_ROOT}/tensorflow/python:collective_ops_gpu_test \
+      -//${PIP_TEST_ROOT}/tensorflow/python:collective_ops_gpu_test_gpu
+

@@ -36,7 +36,11 @@ class LocalCLIDebugHook(session_run_hook.SessionRunHook):
   available.
   """
 
-  def __init__(self, ui_type="curses", dump_root=None, thread_name_filter=None):
+  def __init__(self,
+               ui_type="curses",
+               dump_root=None,
+               thread_name_filter=None,
+               config_file_path=None):
     """Create a local debugger command-line interface (CLI) hook.
 
     Args:
@@ -49,6 +53,8 @@ class LocalCLIDebugHook(session_run_hook.SessionRunHook):
       thread_name_filter: Regular-expression white list for threads on which the
         wrapper session will be active. See doc of `BaseDebugWrapperSession` for
         more details.
+      config_file_path: Optional override to the default configuration file
+        path, which is at `${HOME}/.tfdbg_config`.
     """
 
     self._ui_type = ui_type
@@ -56,6 +62,7 @@ class LocalCLIDebugHook(session_run_hook.SessionRunHook):
     self._thread_name_filter = thread_name_filter
     self._session_wrapper = None
     self._pending_tensor_filters = {}
+    self._config_file_path = config_file_path
 
   def add_tensor_filter(self, filter_name, tensor_filter):
     """Add a tensor filter.
@@ -87,7 +94,8 @@ class LocalCLIDebugHook(session_run_hook.SessionRunHook):
           run_context.session,
           ui_type=self._ui_type,
           dump_root=self._dump_root,
-          thread_name_filter=self._thread_name_filter)
+          thread_name_filter=self._thread_name_filter,
+          config_file_path=self._config_file_path)
 
       # Actually register tensor filters registered prior to the construction
       # of the underlying LocalCLIDebugWrapperSession object.
@@ -128,12 +136,6 @@ class LocalCLIDebugHook(session_run_hook.SessionRunHook):
     elif self._performed_action == framework.OnRunStartAction.PROFILE_RUN:
       # pylint: disable=protected-access
       self._session_wrapper._decorate_run_options_for_profile(run_args.options)
-      # pylint: enable=protected-access
-    elif self._performed_action == framework.OnRunStartAction.INVOKE_STEPPER:
-      # The _finalized property must be set to False so that the NodeStepper
-      # can insert ops for retrieving TensorHandles.
-      # pylint: disable=protected-access
-      run_context.session.graph._finalized = False
       # pylint: enable=protected-access
 
     return run_args

@@ -18,7 +18,7 @@ limitations under the License.
 #include <string>
 
 #include "absl/strings/ascii.h"
-#include "unicode/unistr.h"  // TF:icu
+#include "unicode/unistr.h"  // from @icu
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -45,8 +45,8 @@ class StringLowerOp : public OpKernel {
     OP_REQUIRES_OK(
         ctx, ctx->allocate_output(0, input_tensor->shape(), &output_tensor));
 
-    const auto input = input_tensor->flat<string>();
-    auto output = output_tensor->flat<string>();
+    const auto input = input_tensor->flat<tstring>();
+    auto output = output_tensor->flat<tstring>();
 
     if (encoding_.empty()) {
       for (int64 i = 0; i < input.size(); ++i) {

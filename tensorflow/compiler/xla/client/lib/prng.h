@@ -58,20 +58,22 @@ RngOutput ThreeFryBitGenerator(XlaOp key, XlaOp initial_state,
 // 4x32_10 version of the algorithm for the following reasons:
 //   . 4x32 uses 32-bit multiplication which is fast on GPUs.
 //   . The authors recommend the 10-round variant, and TensorFlow also uses it.
-// 'scramble` controls whether to scramble 'key' and 'initial_state' to form
-// the actual key and state fed to the Philox algorithm.
-RngOutput PhiloxBitGenerator(XlaOp key, XlaOp initial_state, const Shape& shape,
-                             bool scramble);
+RngOutput PhiloxBitGenerator(XlaOp key, XlaOp initial_state,
+                             const Shape& shape);
+// Returns a scrambled pair of (state, key) from a single key.
+std::pair<XlaOp, XlaOp> ScramblePhiloxKey(XlaOp key);
 
 // Uses the given bit generator to generate random bits and then converts the
 // random bits to random numbers of uniform distribution in the given range.
 // Returns the random numbers and the state of the random number generator.
-// This function is for shape with float element type.
-RngOutput UniformF32Distribution(XlaOp key, XlaOp initial_state,
-                                 BitGeneratorTy bit_generator, XlaOp minval,
-                                 XlaOp maxval, const xla::Shape& shape);
+// This function is for shape with floating point element types.
+RngOutput UniformFloatingPointDistribution(XlaOp key, XlaOp initial_state,
+                                           BitGeneratorTy bit_generator,
+                                           XlaOp minval, XlaOp maxval,
+                                           const xla::Shape& shape);
 
-// Similar to UniformF32Distribution but for shape with integer element types.
+// Similar to UniformFloatingPointDistribution but for shape with integer
+// element types.
 RngOutput UniformIntDistribution(XlaOp key, XlaOp initial_state,
                                  BitGeneratorTy bit_generator, XlaOp minval,
                                  XlaOp maxval, const xla::Shape& shape);
@@ -79,9 +81,9 @@ RngOutput UniformIntDistribution(XlaOp key, XlaOp initial_state,
 // Uses the given bit generator to generate random bits and then converts the
 // random bits to random numbers of normal distribution.
 // Returns the random numbers and the state of the random number generator.
-RngOutput NormalF32Distribution(XlaOp key, XlaOp initial_state,
-                                BitGeneratorTy bit_generator,
-                                const xla::Shape& shape);
+RngOutput NormalFloatingPointDistribution(XlaOp key, XlaOp initial_state,
+                                          BitGeneratorTy bit_generator,
+                                          const xla::Shape& shape);
 
 // Concatenates scalars into a vector.
 xla::XlaOp ConcatScalars(xla::XlaBuilder* builder,

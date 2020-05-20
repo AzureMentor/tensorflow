@@ -1,8 +1,13 @@
-package(default_visibility = ["//visibility:public"])
-
-licenses(["notice"])  # Apache 2.0
-
 load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
+load(
+    "//tensorflow/core/platform:build_config_root.bzl",
+    "tf_gpu_tests_tags",
+)
+
+package(
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],  # Apache 2.0
+)
 
 cc_library(
     name = "util",
@@ -29,7 +34,7 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/gl:gl_buffer",
         "//tensorflow/lite/delegates/gpu/gl:gl_program",
         "//tensorflow/lite/delegates/gpu/gl:gl_shader",
-        "//tensorflow/lite/delegates/gpu/gl:uniform_parameter",
+        "//tensorflow/lite/delegates/gpu/gl:variable",
     ],
 )
 
@@ -38,10 +43,10 @@ cc_test(
     size = "small",
     srcs = ["bhwc_to_phwc4_test.cc"],
     linkopts = [
-        "-lGLESv3",
         "-lEGL",
+        "-lGLESv2",
     ],
-    tags = [
+    tags = tf_gpu_tests_tags() + [
         "local",
         "nobuilder",
         "notap",
@@ -74,7 +79,7 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/gl:gl_buffer",
         "//tensorflow/lite/delegates/gpu/gl:gl_program",
         "//tensorflow/lite/delegates/gpu/gl:gl_shader",
-        "//tensorflow/lite/delegates/gpu/gl:uniform_parameter",
+        "//tensorflow/lite/delegates/gpu/gl:variable",
     ],
 )
 
@@ -83,10 +88,10 @@ cc_test(
     size = "small",
     srcs = ["phwc4_to_bhwc_test.cc"],
     linkopts = [
-        "-lGLESv3",
         "-lEGL",
+        "-lGLESv2",
     ],
-    tags = [
+    tags = tf_gpu_tests_tags() + [
         "local",
         "nobuilder",
         "notap",

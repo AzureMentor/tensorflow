@@ -18,10 +18,10 @@ limitations under the License.
 
 #include <memory>
 
+#include "tensorflow/lite/delegates/gpu/common/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
 #include "tensorflow/lite/delegates/gpu/gl/gl_program.h"
-#include "tensorflow/lite/delegates/gpu/gl/gpu_info.h"
 
 namespace tflite {
 namespace gpu {
@@ -35,11 +35,14 @@ class CommandQueue {
   virtual ~CommandQueue() = default;
 
   // Dispatches a program. It may or may not call glFlush.
-  virtual Status Dispatch(const GlProgram& program,
-                          const uint3& workgroups) = 0;
+  virtual absl::Status Dispatch(const GlProgram& program,
+                                const uint3& workgroups) = 0;
+
+  // Called at the end of dispatching of all programs.
+  virtual absl::Status Flush() = 0;
 
   // Waits until all programs dispatched prior this call are completed.
-  virtual Status WaitForCompletion() = 0;
+  virtual absl::Status WaitForCompletion() = 0;
 };
 
 // By default memory barrier is inserted after every dispatch.

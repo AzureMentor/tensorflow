@@ -24,21 +24,22 @@ namespace tflite {
 namespace gpu {
 namespace gl {
 
-Status CreatePHWC4BufferFromTensor(const TensorFloat32& tensor,
-                                   GlBuffer* gl_buffer) {
+absl::Status CreatePHWC4BufferFromTensor(const TensorFloat32& tensor,
+                                         GlBuffer* gl_buffer) {
   std::vector<float> transposed(GetElementsSizeForPHWC4(tensor.shape));
   RETURN_IF_ERROR(
       ConvertToPHWC4(tensor.data, tensor.shape, absl::MakeSpan(transposed)));
   return CreateReadOnlyShaderStorageBuffer<float>(transposed, gl_buffer);
 }
 
-Status CreatePHWC4BufferFromTensorRef(const TensorRefFloat32& tensor_ref,
-                                      GlBuffer* gl_buffer) {
+absl::Status CreatePHWC4BufferFromTensorRef(const TensorRef<BHWC>& tensor_ref,
+                                            GlBuffer* gl_buffer) {
   return CreateReadWriteShaderStorageBuffer<float>(
       GetElementsSizeForPHWC4(tensor_ref.shape), gl_buffer);
 }
 
-Status CopyFromPHWC4Buffer(const GlBuffer& buffer, TensorFloat32* tensor) {
+absl::Status CopyFromPHWC4Buffer(const GlBuffer& buffer,
+                                 TensorFloat32* tensor) {
   return buffer.MappedRead<float>(
       [tensor, &buffer](absl::Span<const float> data) {
         tensor->data.resize(tensor->shape.DimensionsProduct());
@@ -47,18 +48,12 @@ Status CopyFromPHWC4Buffer(const GlBuffer& buffer, TensorFloat32* tensor) {
       });
 }
 
-Status ObjectManager::RegisterBuffer(uint32_t id, GlBuffer buffer) {
-  if (id < buffers_.size()) {
-    if (buffers_[id]) {
-      return AlreadyExistsError(
-          "Buffer with the same id is already registered: " +
-          std::to_string(id));
-    }
-  } else {
+absl::Status ObjectManager::RegisterBuffer(uint32_t id, GlBuffer buffer) {
+  if (id >= buffers_.size()) {
     buffers_.resize(id + 1);
   }
   buffers_[id] = absl::make_unique<GlBuffer>(std::move(buffer));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 void ObjectManager::RemoveBuffer(uint32_t id) {
@@ -71,18 +66,12 @@ GlBuffer* ObjectManager::FindBuffer(uint32_t id) const {
   return id >= buffers_.size() ? nullptr : buffers_[id].get();
 }
 
-Status ObjectManager::RegisterTexture(uint32_t id, GlTexture texture) {
-  if (id < textures_.size()) {
-    if (textures_[id]) {
-      return AlreadyExistsError(
-          "Texture with the same id is already registered: " +
-          std::to_string(id));
-    }
-  } else {
+absl::Status ObjectManager::RegisterTexture(uint32_t id, GlTexture texture) {
+  if (id >= textures_.size()) {
     textures_.resize(id + 1);
   }
   textures_[id] = absl::make_unique<GlTexture>(std::move(texture));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 void ObjectManager::RemoveTexture(uint32_t id) {

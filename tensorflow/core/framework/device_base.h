@@ -21,6 +21,8 @@ limitations under the License.
 #include <vector>
 
 #include "absl/base/macros.h"
+#include "absl/strings/string_view.h"
+#include "tensorflow/core/framework/device_attributes.pb.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/refcount.h"
@@ -82,6 +84,10 @@ class DeviceContext : public core::RefCounted {
     done(errors::Internal("Unrecognized device type in CPU-to-device Copy"));
   }
 
+  // Same as CopyCPUTensorToDevice, but in a synchronous way.
+  Status CopyCPUTensorToDeviceSync(const Tensor* cpu_tensor, Device* device,
+                                   Tensor* device_tensor) const;
+
   // Copies a tensor in this device.
   virtual void CopyTensorInSameDevice(const Tensor* input_tensor,
                                       Device* device, Tensor* output_tensor,
@@ -97,6 +103,11 @@ class DeviceContext : public core::RefCounted {
                                      Tensor* cpu_tensor, StatusCallback done) {
     done(errors::Internal("Unrecognized device type in device-to-CPU Copy"));
   }
+
+  // Same as `CopyDeviceTensorToCPU`, but blocks until the copy is done.
+  Status CopyDeviceTensorToCPUSync(const Tensor* device_tensor,
+                                   StringPiece tensor_name, Device* device,
+                                   Tensor* cpu_tensor);
 
   // If possible, wait for all events on *stream to complete then execute func.
   // A non-OK Status is returned otherwise.  The stream argument should be the
@@ -118,11 +129,6 @@ class DeviceBase {
 
   Env* env() const { return env_; }
 
-  // Override this to return true for devices that require an Op's
-  // compute method to save references to the temporary tensors it
-  // allocates until the Op execution completes
-  virtual bool RequiresRecordingAccessedTensors() const { return false; }
-
   struct CpuWorkerThreads {
     int num_threads = 0;
     thread::ThreadPool* workers = nullptr;
@@ -141,7 +147,7 @@ class DeviceBase {
   // "stream" is used in special circumstances (such as the
   // constructors of Ops) where there is no available OpKernelContext.
   // "default_context" is used by OpKernelContext whenever a device does not
-  // supply a DeviceContext for an op in FillContextMap (e.g. when only
+  // supply a DeviceContext for an op in TryGetDeviceContext() (e.g. when only
   // using a single stream.)
   // "event_mgr" is used to delay deallocation of temporary GPU buffers.
   // TODO(pbar) Work out how to move this out of DeviceBase.
@@ -201,7 +207,9 @@ class DeviceBase {
 
   virtual ScopedAllocatorMgr* GetScopedAllocatorMgr() const { return nullptr; }
 
-  bool has_eigen_cpu_device() const { return !eigen_cpu_devices_.empty(); }
+  virtual bool has_eigen_cpu_device() const {
+    return !eigen_cpu_devices_.empty();
+  }
 
   virtual const Eigen::ThreadPoolDevice* eigen_cpu_device();
 
@@ -231,6 +239,7 @@ class DeviceBase {
 
   // Unimplemented by default
   virtual const DeviceAttributes& attributes() const;
+  virtual int NumaNode() const { return attributes().locality().numa_node(); }
   virtual const string& name() const;
 
   // Materializes the given TensorProto into 'tensor' stored in Device
@@ -288,6 +297,12 @@ class DeviceBase {
   Eigen::SyclDevice* eigen_sycl_device_ = nullptr;
 #endif
 };
+
+// Methods to create and check for Symbolic execution devices.
+// Such devices are mostly used for TF-XLA bridge. TF should not treat these as
+// normal devices.
+void AddSymbolicExecutionDevice(absl::string_view device_name);
+bool IsSymbolicExecutionDevice(absl::string_view device_name);
 
 }  // namespace tensorflow
 

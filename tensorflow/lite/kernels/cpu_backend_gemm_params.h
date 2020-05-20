@@ -29,6 +29,17 @@ namespace cpu_backend_gemm {
 // Matrix storage order: column-major or row-major.
 enum class Order { kColMajor, kRowMajor };
 
+enum class CachePolicy : std::uint8_t {
+  kNeverCache,
+  kCacheIfLargeSpeedup,
+  kAlwaysCache,
+};
+
+inline CachePolicy DefaultCachePolicy(bool is_constant_data) {
+  return is_constant_data ? CachePolicy::kCacheIfLargeSpeedup
+                          : CachePolicy::kNeverCache;
+}
+
 // MatrixParams encapsulates the parameters that Gemm needs about each
 // matrix, besides the buffer data pointer.
 // Compare to ruy::Matrix, which also encapsulates the data pointer.
@@ -47,6 +58,13 @@ struct MatrixParams {
   // The zero_point, i.e. which Scalar value is to be interpreted as zero.
   // When Scalar is floating-point, this must be 0.
   Scalar zero_point = 0;
+  // When the data pointed to by this matrix is constant data, so that it is
+  // valid to assume that equality of pointers implies equality of data,
+  // a CachePolicy may be used instead of the default kNeverCache,
+  // which will enable ruy to take advantage of this constancy of the data to
+  // cache the packing work, which can be a large speedup in matrix*vector
+  // and other narrow shapes.
+  CachePolicy cache_policy = CachePolicy::kNeverCache;
 };
 
 // Enumeration of broad categories of Gemm.
@@ -150,10 +168,6 @@ template <typename AccumScalar, typename DstScalar,
           QuantizationFlavor quantization_flavor>
 void ValidateGemmParams(
     const GemmParams<AccumScalar, DstScalar, quantization_flavor>& params) {
-  // For now require a bias vector. Again, ruy does not rely on that requirement
-  // but the gemmlowp and Eigen path would require more code to handle it,
-  // and currently TFLite only uses the case where there is a bias vector.
-  TFLITE_DCHECK(params.bias);
   // Guard consistency of the quantized multiplier fields.
   if (quantization_flavor == QuantizationFlavor::kFloatingPoint) {
     TFLITE_DCHECK(!params.multiplier_fixedpoint);
@@ -161,17 +175,26 @@ void ValidateGemmParams(
     TFLITE_DCHECK(!params.multiplier_fixedpoint_perchannel);
     TFLITE_DCHECK(!params.multiplier_exponent_perchannel);
   } else if (quantization_flavor ==
-             QuantizationFlavor::kIntegerWithUniformMultiplier) {
+                 QuantizationFlavor::kIntegerWithUniformMultiplier &&
+             !std::is_same<DstScalar, int32_t>::value) {
     TFLITE_DCHECK(params.multiplier_fixedpoint);
     // Nothing to check about multiplier_exponent
     TFLITE_DCHECK(!params.multiplier_fixedpoint_perchannel);
     TFLITE_DCHECK(!params.multiplier_exponent_perchannel);
   } else if (quantization_flavor ==
-             QuantizationFlavor::kIntegerWithPerRowMultiplier) {
+                 QuantizationFlavor::kIntegerWithPerRowMultiplier &&
+             !std::is_same<DstScalar, int32_t>::value) {
     TFLITE_DCHECK(!params.multiplier_fixedpoint);
     TFLITE_DCHECK(!params.multiplier_exponent);
     TFLITE_DCHECK(params.multiplier_fixedpoint_perchannel);
     TFLITE_DCHECK(params.multiplier_exponent_perchannel);
+  } else {
+    // For the get raw accumulator case, we should make sure none of the
+    // quantization params are set.
+    TFLITE_DCHECK(!params.multiplier_fixedpoint);
+    TFLITE_DCHECK(!params.multiplier_exponent);
+    TFLITE_DCHECK(!params.multiplier_fixedpoint_perchannel);
+    TFLITE_DCHECK(!params.multiplier_exponent_perchannel);
   }
 }
 

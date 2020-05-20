@@ -18,17 +18,21 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl.testing import parameterized
 import numpy as np
 
+from tensorflow.python import keras
 from tensorflow.python.eager import context
 from tensorflow.python.framework import test_util
+from tensorflow.python.keras import combinations
+from tensorflow.python.keras.layers import core
 from tensorflow.python.keras.layers import dense_attention
 from tensorflow.python.ops import array_ops
 from tensorflow.python.platform import test
 
 
-@test_util.run_all_in_graph_and_eager_modes
-class BaseDenseAttentionTest(test.TestCase):
+@combinations.generate(combinations.combine(mode=['graph', 'eager']))
+class BaseDenseAttentionTest(test.TestCase, parameterized.TestCase):
 
   def test_one_dim_with_mask(self):
     # Scores tensor of shape [1, 1, 1]
@@ -119,9 +123,37 @@ class BaseDenseAttentionTest(test.TestCase):
     expected = np.array([[[1.6]], [[2.6]]], dtype=np.float32)
     self.assertAllClose(expected, actual)
 
+  def test_shape_with_dropout(self):
+    # scores: Scores float tensor of shape `[batch_size, tq, tv]`.
+    # value: Value tensor of shape `[batch_size, tv, dim]`.
+    batch_size = 4
+    tq = 5
+    tv = 6
+    dim = 7
+    scores = np.ones((batch_size, tq, tv))
+    value = np.ones((batch_size, tv, dim))
+    actual = dense_attention.BaseDenseAttention(dropout=0.1)._apply_scores(
+        scores=scores, value=value, training=False)
 
-@test_util.run_all_in_graph_and_eager_modes
-class AttentionTest(test.TestCase):
+    # Expected Tensor of shape `[batch_size, tq, dim]`.
+    expected_shape = [batch_size, tq, dim]
+    self.assertAllEqual(expected_shape, array_ops.shape(actual))
+
+  def test_serialization(self):
+    # Test serialization with causal
+    layer = dense_attention.BaseDenseAttention(causal=True)
+
+    config = keras.layers.serialize(layer)
+    new_layer = keras.layers.deserialize(config)
+    self.assertEqual(new_layer.causal, True)
+
+    config = layer.get_config()
+    new_layer = dense_attention.BaseDenseAttention.from_config(config)
+    self.assertEqual(new_layer.causal, True)
+
+
+@combinations.generate(combinations.combine(mode=['graph', 'eager']))
+class AttentionTest(test.TestCase, parameterized.TestCase):
 
   def test_calculate_scores_one_dim(self):
     # Query tensor of shape [1, 1, 1]
@@ -413,9 +445,35 @@ class AttentionTest(test.TestCase):
         ValueError, 'Attention layer mask must be a list of length 2'):
       attention_layer([q, q], mask=[mask, mask, mask])
 
+  def test_override_mask(self):
+    attention_layer = dense_attention.Attention()
+    q = core.Masking()(np.array([[[1.1]]], dtype=np.float32))
+    mask = np.array([[False]], dtype=np.bool_)
+    actual = attention_layer([q, q], mask=[mask, mask])
+    self.assertAllClose([[[0]]], actual)
 
-@test_util.run_all_in_graph_and_eager_modes
-class AdditiveAttentionTest(test.TestCase):
+  def test_implicit_mask(self):
+    attention_layer = dense_attention.Attention()
+    q = core.Masking(1.1)(np.array([[[1.1], [1]]], dtype=np.float32))
+    v = core.Masking(1.2)(np.array([[[1.2], [1]]], dtype=np.float32))
+    actual = attention_layer([q, v])
+    self.assertAllClose([[[0], [1]]], actual)
+
+  def test_serialization(self):
+    # Test serialization with use_scale
+    layer = dense_attention.Attention(use_scale=True)
+
+    config = keras.layers.serialize(layer)
+    new_layer = keras.layers.deserialize(config)
+    self.assertEqual(new_layer.use_scale, True)
+
+    config = layer.get_config()
+    new_layer = dense_attention.Attention.from_config(config)
+    self.assertEqual(new_layer.use_scale, True)
+
+
+@combinations.generate(combinations.combine(mode=['graph', 'eager']))
+class AdditiveAttentionTest(test.TestCase, parameterized.TestCase):
 
   def test_calculate_scores_one_dim(self):
     # Query tensor of shape [1, 1, 1]
@@ -647,9 +705,21 @@ class AdditiveAttentionTest(test.TestCase):
     expected = np.array([[[1.15497245968], [0.]]], dtype=np.float32)
     self.assertAllClose(expected, actual)
 
+  def test_serialization(self):
+    # Test serialization with use_scale
+    layer = dense_attention.AdditiveAttention(use_scale=True)
 
-@test_util.run_all_in_graph_and_eager_modes
-class LowerTriangularMaskTest(test.TestCase):
+    config = keras.layers.serialize(layer)
+    new_layer = keras.layers.deserialize(config)
+    self.assertEqual(new_layer.use_scale, True)
+
+    config = layer.get_config()
+    new_layer = dense_attention.AdditiveAttention.from_config(config)
+    self.assertEqual(new_layer.use_scale, True)
+
+
+@combinations.generate(combinations.combine(mode=['graph', 'eager']))
+class LowerTriangularMaskTest(test.TestCase, parameterized.TestCase):
 
   def test_square_shape(self):
     actual = dense_attention._lower_triangular_mask([3, 3])

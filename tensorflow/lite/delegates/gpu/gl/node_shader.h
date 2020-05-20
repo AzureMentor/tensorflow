@@ -16,18 +16,20 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_DELEGATES_GPU_GL_NODE_SHADER_H_
 #define TENSORFLOW_LITE_DELEGATES_GPU_GL_NODE_SHADER_H_
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "absl/types/any.h"
+#include "tensorflow/lite/delegates/gpu/common/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
 #include "tensorflow/lite/delegates/gpu/gl/compiler_options.h"
-#include "tensorflow/lite/delegates/gpu/gl/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/gl/object.h"
-#include "tensorflow/lite/delegates/gpu/gl/uniform_parameter.h"
+#include "tensorflow/lite/delegates/gpu/gl/variable.h"
 
 namespace tflite {
 namespace gpu {
@@ -58,10 +60,13 @@ enum class IOStructure {
 
 struct GeneratedCode {
   // A list of parameters to be set as uniform or hardcoded in a shader.
-  std::vector<UniformParameter> parameters;
+  std::vector<Variable> parameters;
 
   // A list of objects to bind before shader could be executed.
   std::vector<std::pair<std::string, Object>> objects;
+
+  // A list of shared variables in the shader program.
+  std::vector<Variable> shared_variables;
 
   // Compute shader operate on an abstract concept of work groups, each
   // three-dimensional. The number of work groups to be executed is defined by
@@ -91,15 +96,24 @@ class NodeShader {
 
   // A context for generating a code.
   struct GenerationContext {
-    const GraphFloat32* graph;
     const GpuInfo* gpu_info;
-    const Node* node;
     CompilationOptions compiler_options;
+
+    // Information extracted & copied from compiled graph.
+    const std::string& op_type;
+    const absl::any& op_attr;
+    // Do NOT use StrongShape<Layout::BHWC> in preparation for
+    // RankedTensorType::getShape() which returns ArrayRef<int64_t>.
+    std::vector<std::array<int64_t, 4>> input_shapes;
+    std::vector<std::array<int64_t, 4>> output_shapes;
   };
 
   // Generates shader code for a node. The code should be just a function body.
-  virtual Status GenerateCode(const GenerationContext& ctx,
-                              GeneratedCode* generated_code) const = 0;
+  virtual absl::Status GenerateCode(const GenerationContext& ctx,
+                                    GeneratedCode* generated_code) const = 0;
+
+  // Limit the size of the const offsets array
+  static constexpr int kMaxConstArraySize = 9;
 };
 
 }  // namespace gl

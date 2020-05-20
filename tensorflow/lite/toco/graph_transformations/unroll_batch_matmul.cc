@@ -177,7 +177,7 @@ TransposeOperator* TransposeInput(const string& input, Model* model) {
 
   CHECK_EQ(input_array_a.shape().dims(dims_a - 1),
            input_array_b.shape().dims(dims_b - 2))
-      << "Input dimensions must be compatible for multipication. shape a = ["
+      << "Input dimensions must be compatible for multiplication. shape a = ["
       << absl::StrJoin(input_array_a.shape().dims(), ", ") << "], shape b = ["
       << absl::StrJoin(input_array_b.shape().dims(), ", ") << "]";
 
@@ -188,9 +188,8 @@ TransposeOperator* TransposeInput(const string& input, Model* model) {
     auto* matmul_op = new TensorFlowMatMulOperator;
     matmul_op->inputs = {input_lhs, input_rhs};
     matmul_op->outputs = batch_op->outputs;
-    tail_it = model->operators.emplace(tail_it, matmul_op) + 1;
-    CHECK_EQ(tail_it->get(), batch_op);
-    model->operators.erase(tail_it);
+    model->operators.emplace(tail_it, matmul_op);
+    DeleteOpAndArrays(model, batch_op);
     *modified = true;
     return ::tensorflow::Status::OK();
   }
@@ -242,8 +241,11 @@ TransposeOperator* TransposeInput(const string& input, Model* model) {
 
   // Reshape the rank-3 Tensor into the correct output shape.
   const auto& result_batch_shape = bcast.output_batch_shape().dim_sizes();
-  std::vector<int> result_shape(result_batch_shape.begin(),
-                                result_batch_shape.end());
+  std::vector<int> result_shape;
+  // Explicitly cast 64-bit sizes to int in order to avoid MSVC warnings.
+  std::transform(result_batch_shape.begin(), result_batch_shape.end(),
+                 std::back_inserter(result_shape),
+                 [](const int64 dim) { return static_cast<int>(dim); });
   result_shape.push_back(input_array_a.shape().dims(dims_a - 2));
   result_shape.push_back(input_array_b.shape().dims(dims_b - 1));
 
@@ -254,16 +256,7 @@ TransposeOperator* TransposeInput(const string& input, Model* model) {
   reshape_result_op->outputs = {batch_op->outputs[0]};
   model->operators.emplace(tail_it, reshape_result_op);
 
-  // Remove the old batch matmul now that we've unrolled.
-  batch_op_it = model->operators.begin();
-  for (; batch_op_it != model->operators.end(); ++batch_op_it) {
-    if (batch_op_it->get() == batch_op) {
-      break;
-    }
-  }
-  CHECK(batch_op_it != model->operators.end());
-  CHECK(batch_op_it->get() == batch_op);
-  model->operators.erase(batch_op_it);
+  DeleteOpAndArrays(model, batch_op);
   *modified = true;
   return ::tensorflow::Status::OK();
 }

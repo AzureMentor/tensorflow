@@ -18,19 +18,19 @@ limitations under the License.
 
 #include <vector>
 
+#include "tensorflow/lite/delegates/gpu/common/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
 #include "tensorflow/lite/delegates/gpu/gl/command_queue.h"
 #include "tensorflow/lite/delegates/gpu/gl/gl_buffer.h"
 #include "tensorflow/lite/delegates/gpu/gl/gl_program.h"
 #include "tensorflow/lite/delegates/gpu/gl/gl_shader.h"
-#include "tensorflow/lite/delegates/gpu/gl/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/gl/object.h"
 #include "tensorflow/lite/delegates/gpu/gl/object_manager.h"
 #include "tensorflow/lite/delegates/gpu/gl/runtime/shared_buffer.h"
 #include "tensorflow/lite/delegates/gpu/gl/runtime_options.h"
 #include "tensorflow/lite/delegates/gpu/gl/stats.h"
-#include "tensorflow/lite/delegates/gpu/gl/uniform_parameter.h"
+#include "tensorflow/lite/delegates/gpu/gl/variable.h"
 
 namespace tflite {
 namespace gpu {
@@ -44,20 +44,22 @@ class Runtime {
           CommandQueue* command_queue, const ObjectManager* external_objects);
 
   // Takes parameters and objects and prepares GL program.
-  Status AddProgram(const GlShader& shader,
-                    const std::vector<UniformParameter>& parameters,
-                    const std::vector<Object>& objects,
-                    const uint3& num_workgroups);
+  absl::Status AddProgram(const GlShader& shader,
+                          const std::vector<Variable>& parameters,
+                          const std::vector<Object>& objects,
+                          const uint3& num_workgroups);
 
   // Needs to be called once all programs and shaders has been added to runtime.
-  Status PrepareForExecution();
+  absl::Status PrepareForExecution();
 
   // Executes all compiled programs.
   // TODO(akulik): add more controls over execution. Execution policy?
-  Status Execute();
+  absl::Status Execute();
 
   // Gets access to objects created while executing generated code.
   const ObjectManager* internal_objects() const { return &internal_objects_; }
+
+  CommandQueue* command_queue() { return command_queue_; }
 
   RuntimeStats stats() const {
     RuntimeStats stats;
@@ -70,14 +72,14 @@ class Runtime {
   }
 
  private:
-  Status AllocateInternalObject(const Object& object);
+  absl::Status AllocateInternalObject(const Object& object);
 
-  Status AllocateConstObject(const Object& object, uint32_t* id);
+  absl::Status AllocateConstObject(const Object& object, uint32_t* id);
 
   // Goes over objects in programs and decides how to allocate them to
   // minimize total allocated memory. Returns a collection of objects to be
   // allocated and shared by internal objects.
-  Status AssignInternalObjects(std::vector<Object>* objects);
+  absl::Status AssignInternalObjects(std::vector<Object>* objects);
 
   const RuntimeOptions options_;
   const GpuInfo gpu_info_;
@@ -90,7 +92,7 @@ class Runtime {
 
   std::unique_ptr<SharedBufferData> shared_readonly_buffer_;
 
-  using BindFunc = std::function<Status()>;
+  using BindFunc = std::function<absl::Status()>;
 
   // Encapsulates a program and all object to bind before dispatch.
   struct CompiledProgramDescriptor {

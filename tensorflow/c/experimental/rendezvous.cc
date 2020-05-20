@@ -24,9 +24,9 @@ limitations under the License.
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/rendezvous.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/core/stringpiece.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/stringpiece.h"
 
 namespace tensorflow {
 
@@ -45,6 +45,9 @@ CRemoteRendezvous::CRemoteRendezvous(const WorkerEnv* env, int64 step_id,
 void CRemoteRendezvous::RecvFromRemoteAsync(const Rendezvous::ParsedKey& parsed,
                                             const Rendezvous::Args& args,
                                             DoneCallback done) {
+  if (args.cancellation_manager != nullptr) {
+    VLOG(1) << "WARNING: CRemoteRendezvous does not support cancellation.";
+  }
   TF_ParsedKey key;
   key.src_device = parsed.src_device.data();
   key.src_device_len = parsed.src_device.size();

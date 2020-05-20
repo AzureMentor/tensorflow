@@ -32,7 +32,6 @@ import numpy as np
 from tensorflow.core.protobuf import meta_graph_pb2
 from tensorflow.core.protobuf import saver_pb2
 from tensorflow.core.protobuf import trackable_object_graph_pb2
-from tensorflow.python import pywrap_tensorflow
 from tensorflow.python.client import session
 from tensorflow.python.eager import context
 from tensorflow.python.framework import constant_op
@@ -49,6 +48,7 @@ from tensorflow.python.ops import variables
 from tensorflow.python.platform import gfile
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import checkpoint_management
+from tensorflow.python.training import py_checkpoint_reader
 from tensorflow.python.training import training_util
 from tensorflow.python.training.saving import saveable_object
 from tensorflow.python.training.saving import saveable_object_util
@@ -242,14 +242,22 @@ class BaseSaverBuilder(object):
     #     <train dir>/
     #        myckpt{.index, .data-?????-of-?????}
     #
+    #   Filesystems with eventual consistency (such as S3), don't need a
+    #   temporary location. Using a temporary directory in those cases might
+    #   cause situations where files are not available during copy.
+    #
     # Users only need to interact with the user-specified prefix, which is
     # "<train dir>/myckpt" in this case.  Save() and Restore() work with the
     # prefix directly, instead of any physical pathname.  (On failure and
     # subsequent restore, an outdated and orphaned temporary directory can be
     # safely removed.)
-    _SHARDED_SUFFIX = "_temp_%s/part" % uuid.uuid4().hex
-    tmp_checkpoint_prefix = string_ops.string_join(
-        [checkpoint_prefix, _SHARDED_SUFFIX])
+    with ops.device("CPU"):
+      _SHARDED_SUFFIX = array_ops.where(
+          string_ops.regex_full_match(checkpoint_prefix, "^s3://.*"),
+          constant_op.constant(".part"),
+          constant_op.constant("_temp_%s/part" % uuid.uuid4().hex))
+      tmp_checkpoint_prefix = string_ops.string_join(
+          [checkpoint_prefix, _SHARDED_SUFFIX])
 
     num_shards = len(per_device)
     sharded_saves = []
@@ -401,7 +409,7 @@ class BaseSaverBuilder(object):
     per_device = collections.defaultdict(lambda: [])
     for saveable in saveables:
       canonical_device = set(
-          pydev.canonical_name(spec.tensor.device) for spec in saveable.specs)
+          pydev.canonical_name(spec.device) for spec in saveable.specs)
       if len(canonical_device) != 1:
         raise ValueError("All tensors of a saveable object must be "
                          "on the same device: %s" % saveable.name)
@@ -722,6 +730,9 @@ class Saver(object):
     saver = tf.compat.v1.train.Saver({v.op.name: v for v in [v1, v2]})
     ```
 
+    Note: the newer `AutoTrackable` API is not supported by `Saver`. In this
+    case, the `tf.train.Checkpoint` class should be used.
+
     The optional `reshape` argument, if `True`, allows restoring a variable from
     a save file where the variable had a different shape, but the same number
     of elements and type.  This is useful if you have reshaped a variable and
@@ -774,7 +785,7 @@ class Saver(object):
       TypeError: If `var_list` is invalid.
       ValueError: If any of the keys or values in `var_list` are not unique.
       RuntimeError: If eager execution is enabled and`var_list` does not specify
-        a list of varialbes to save.
+        a list of variables to save.
 
     @compatibility(eager)
     When eager execution is enabled, `var_list` must specify a `list` or `dict`
@@ -1141,6 +1152,7 @@ class Saver(object):
     if os.path.split(latest_filename)[0]:
       raise ValueError("'latest_filename' must not contain path components")
 
+    save_path = compat.as_str(save_path)
     if global_step is not None:
       if not isinstance(global_step, compat.integral_types):
         global_step = training_util.global_step(sess, global_step)
@@ -1273,11 +1285,12 @@ class Saver(object):
     if save_path is None:
       raise ValueError("Can't load save_path when it is None.")
 
-    if not checkpoint_management.checkpoint_exists(compat.as_text(save_path)):
+    checkpoint_prefix = compat.as_text(save_path)
+    if not checkpoint_management.checkpoint_exists_internal(checkpoint_prefix):
       raise ValueError("The passed save_path is not a valid checkpoint: " +
-                       compat.as_text(save_path))
+                       checkpoint_prefix)
 
-    logging.info("Restoring parameters from %s", compat.as_text(save_path))
+    logging.info("Restoring parameters from %s", checkpoint_prefix)
     try:
       if context.executing_eagerly():
         self._build_eager(save_path, build_save=False, build_restore=True)
@@ -1376,13 +1389,13 @@ def import_meta_graph(meta_graph_or_file,
   the model from scratch.
 
   ```Python
-  with tf.compat.v1.Session() as sess:
+  with tf.Session() as sess:
     new_saver =
-    tf.compat.v1.train.import_meta_graph('my-save-dir/my-model-10000.meta')
+    tf.train.import_meta_graph('my-save-dir/my-model-10000.meta')
     new_saver.restore(sess, 'my-save-dir/my-model-10000')
-    # tf.compat.v1.get_collection() returns a list. In this example we only want
+    # tf.get_collection() returns a list. In this example we only want
     # the first one.
-    train_op = tf.compat.v1.get_collection('train_op')[0]
+    train_op = tf.get_collection('train_op')[0]
     for step in xrange(1000000):
       sess.run(train_op)
   ```
@@ -1390,20 +1403,20 @@ def import_meta_graph(meta_graph_or_file,
   NOTE: Restarting training from saved `meta_graph` only works if the
   device assignments have not changed.
 
-  Example 2:
+  Example:
   Variables, placeholders, and independent operations can also be stored, as
   shown in the following example.
 
   ```Python
   # Saving contents and operations.
-  v1 = tf.compat.v1.placeholder(tf.float32, name="v1")
-  v2 = tf.compat.v1.placeholder(tf.float32, name="v2")
-  v3 = tf.mul(v1, v2)
+  v1 = tf.placeholder(tf.float32, name="v1")
+  v2 = tf.placeholder(tf.float32, name="v2")
+  v3 = tf.math.multiply(v1, v2)
   vx = tf.Variable(10.0, name="vx")
   v4 = tf.add(v3, vx, name="v4")
-  saver = tf.compat.v1.train.Saver([vx])
-  sess = tf.compat.v1.Session()
-  sess.run(tf.compat.v1.initialize_all_variables())
+  saver = tf.train.Saver([vx])
+  sess = tf.Session()
+  sess.run(tf.global_variables_initializer())
   sess.run(vx.assign(tf.add(vx, vx)))
   result = sess.run(v4, feed_dict={v1:12.0, v2:3.3})
   print(result)
@@ -1414,8 +1427,8 @@ def import_meta_graph(meta_graph_or_file,
 
   ```Python
   # Restoring variables and running operations.
-  saver = tf.compat.v1.train.import_meta_graph("./model_ex1.meta")
-  sess = tf.compat.v1.Session()
+  saver = tf.train.import_meta_graph("./model_ex1.meta")
+  sess = tf.Session()
   saver.restore(sess, "./model_ex1")
   result = sess.run("v4:0", feed_dict={"v1:0": 12.0, "v2:0": 3.3})
   print(result)
@@ -1610,7 +1623,7 @@ def object_graph_key_mapping(checkpoint_path):
   Returns:
     Dictionary mapping tensor names to checkpoint keys.
   """
-  reader = pywrap_tensorflow.NewCheckpointReader(checkpoint_path)
+  reader = py_checkpoint_reader.NewCheckpointReader(checkpoint_path)
   object_graph_string = reader.get_tensor(trackable.OBJECT_GRAPH_PROTO_KEY)
   object_graph_proto = (trackable_object_graph_pb2.TrackableObjectGraph())
   object_graph_proto.ParseFromString(object_graph_string)
@@ -1650,7 +1663,7 @@ def saver_from_object_based_checkpoint(checkpoint_path,
       `var_list` will be set to all saveable objects.
     builder: a `BaseSaverBuilder` instance. If `None`, a new `BulkSaverBuilder`
       will be created.
-    names_to_keys: dict mapping string tensor names to checkpooint keys. If
+    names_to_keys: dict mapping string tensor names to checkpoint keys. If
       `None`, this dict will be generated from the checkpoint file.
     cached_saver: Cached `Saver` object with remapped variables.
 

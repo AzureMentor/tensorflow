@@ -38,7 +38,6 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 
@@ -56,6 +55,10 @@ Status RingReducer::InitializeCollectiveParams(CollectiveParams* col_params) {
 void RingReducer::Run(StatusCallback done) {
   CHECK(col_ctx_);
   CHECK(col_params_);
+  // Since `RingReducer` doesn't require non-overlapping collectives, unblock
+  // any collective that is blocked on this instance.
+  col_ctx_->col_exec->UnblockDependencies(*col_params_);
+
   done_ = std::move(done);
   group_size_ = col_params_->group.group_size;
   num_subdivs_ = static_cast<int>(
@@ -92,7 +95,7 @@ void RingReducer::Run(StatusCallback done) {
     Status status;
     profiler::TraceMe activity("MemCpyAsync", profiler::TraceMeLevel::kInfo);
     CollectiveRemoteAccessLocal::MemCpyAsync(
-        col_ctx_->op_ctx->input_device_context(0),
+        col_ctx_->op_ctx->op_device_context(),
         col_ctx_->op_ctx->op_device_context(), col_ctx_->device,
         col_ctx_->device, col_ctx_->op_ctx->input_alloc_attr(0),
         col_ctx_->op_ctx->output_alloc_attr(0), col_ctx_->input,
@@ -346,6 +349,8 @@ bool RingReducer::RunAsyncParts() {
   return !aborted;
 }
 
+namespace {
 REGISTER_COLLECTIVE(RingReduce, RingReducer);
+}  // namespace
 
 }  // namespace tensorflow

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #define EIGEN_USE_GPU
 
@@ -21,6 +21,7 @@ limitations under the License.
 #include <stdio.h>
 
 #include "tensorflow/core/framework/tensor_types.h"
+#include "tensorflow/core/kernels/gpu_prim.h"
 #include "tensorflow/core/kernels/multinomial_op.h"
 #include "tensorflow/core/kernels/random_op.h"
 #include "tensorflow/core/kernels/reduction_gpu_kernels.cu.h"
@@ -39,14 +40,16 @@ using GPUDevice = Eigen::GpuDevice;
 //   scores: [B, S, C];  maxima: [B, S];  output: [B, S].
 template <typename OutputType>
 __global__ void MultinomialKernel(int32 nthreads, const int32 num_classes,
-                                  const int32 num_samples, const float* scores,
-                                  const float* maxima, OutputType* output) {
-  CUDA_1D_KERNEL_LOOP(index, nthreads) {
+                                  const int32 num_samples,
+                                  const float* __restrict__ scores,
+                                  const float* __restrict__ maxima,
+                                  OutputType* __restrict__ output) {
+  GPU_1D_KERNEL_LOOP(index, nthreads) {
     const int maxima_idx = index / num_classes;
     if (ldg(maxima + maxima_idx) == ldg(scores + index)) {
       using UnsignedOutputType = typename std::make_unsigned<OutputType>::type;
-      CudaAtomicMax(reinterpret_cast<UnsignedOutputType*>(output + maxima_idx),
-                    static_cast<UnsignedOutputType>(index % num_classes));
+      GpuAtomicMax(reinterpret_cast<UnsignedOutputType*>(output + maxima_idx),
+                   static_cast<UnsignedOutputType>(index % num_classes));
     }
   }
 }
@@ -98,8 +101,9 @@ struct MultinomialFunctor<GPUDevice, T, OutputType> {
     // Max-reduce along classes for each (batch, sample).
     typedef const Eigen::array<TTypes<float>::Tensor::Index, 1>& ReductionAxes;
     Constants<GPUDevice> constants;
-    cub::Max op;
-    functor::ReduceImpl<float, cub::Max, float*, const float*, ReductionAxes>(
+    gpuprim::Max op;
+    functor::ReduceImpl<float, gpuprim::Max, float*, const float*,
+                        ReductionAxes>(
         /*ctx=*/ctx, /*out=*/maxima.data(), /*in=*/scores.data(), /*in_rank=*/2,
         /*in_dim0=*/batch_size * num_samples,
         /*in_dim1=*/num_classes, /*in_dim2=*/1, /*out_rank=*/1,
@@ -109,8 +113,8 @@ struct MultinomialFunctor<GPUDevice, T, OutputType> {
     output.device(d) = output.constant(0LL);
 
     const int32 work_items = batch_size * num_samples * num_classes;
-    CudaLaunchConfig config = GetCudaLaunchConfig(work_items, d);
-    TF_CHECK_OK(CudaLaunchKernel(
+    GpuLaunchConfig config = GetGpuLaunchConfig(work_items, d);
+    TF_CHECK_OK(GpuLaunchKernel(
         MultinomialKernel<OutputType>, config.block_count,
         config.thread_per_block, 0, d.stream(), config.virtual_thread_count,
         num_classes, num_samples, scores.data(), maxima.data(), output.data()));
@@ -133,4 +137,4 @@ template struct MultinomialFunctor<GPUDevice, int64, int64>;
 }  // namespace functor
 }  // namespace tensorflow
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

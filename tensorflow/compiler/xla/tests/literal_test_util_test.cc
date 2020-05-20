@@ -25,6 +25,7 @@ limitations under the License.
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/path.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace xla {
@@ -127,8 +128,12 @@ TEST(LiteralTestUtilTest, ExpectNearFailurePlacesResultsInTemporaryDirectory) {
   };
 
   tensorflow::Env* env = tensorflow::Env::Default();
-  string pattern =
-      tensorflow::io::JoinPath(tensorflow::testing::TmpDir(), "/tempfile-*");
+
+  string outdir;
+  if (!tensorflow::io::GetTestUndeclaredOutputsDir(&outdir)) {
+    outdir = tensorflow::testing::TmpDir();
+  }
+  string pattern = tensorflow::io::JoinPath(outdir, "tempfile-*.pb");
   std::vector<string> files;
   TF_CHECK_OK(env->GetMatchingPaths(pattern, &files));
   for (const auto& f : files) {

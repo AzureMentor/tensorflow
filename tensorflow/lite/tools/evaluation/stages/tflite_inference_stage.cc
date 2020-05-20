@@ -18,6 +18,7 @@ limitations under the License.
 #include <fstream>
 
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/profiling/time.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_stages.pb.h"
 #include "tensorflow/lite/tools/evaluation/utils.h"
@@ -39,7 +40,38 @@ TfLiteModelInfo GetTfliteModelInfo(const Interpreter& interpreter) {
 
 }  // namespace
 
-TfLiteStatus TfliteInferenceStage::Init() {
+void TfliteInferenceStage::UpdateModelInfo() {
+  model_info_ = GetTfliteModelInfo(*interpreter_);
+
+  outputs_.clear();
+  outputs_.reserve(interpreter_->outputs().size());
+  for (int i : interpreter_->outputs()) {
+    TfLiteTensor* tensor = interpreter_->tensor(i);
+    outputs_.push_back(tensor->data.raw);
+  }
+}
+
+TfLiteStatus TfliteInferenceStage::ApplyCustomDelegate(
+    Interpreter::TfLiteDelegatePtr delegate) {
+  if (!interpreter_) {
+    LOG(ERROR) << "Stage not initialized before calling ApplyCustomDelegate";
+    return kTfLiteError;
+  }
+  // Skip if delegate is a nullptr.
+  if (!delegate) {
+    LOG(WARNING)
+        << "Tried to apply null TfLiteDelegatePtr to TfliteInferenceStage";
+    return kTfLiteOk;
+  }
+  delegates_.push_back(std::move(delegate));
+  TF_LITE_ENSURE_STATUS(
+      interpreter_->ModifyGraphWithDelegate(delegates_.back().get()));
+  UpdateModelInfo();
+  return kTfLiteOk;
+}
+
+TfLiteStatus TfliteInferenceStage::Init(
+    const DelegateProviders* delegate_providers) {
   if (!config_.specification().has_tflite_inference_params()) {
     LOG(ERROR) << "TfliteInferenceParams not provided";
     return kTfLiteError;
@@ -64,38 +96,29 @@ TfLiteStatus TfliteInferenceStage::Init() {
   }
   interpreter_->SetNumThreads(params.num_threads());
 
-  // TODO(b/122482115): Add support for multiple delegates in
-  // TfLiteInferenceParams.
-  if (params.delegate() == TfliteInferenceParams::NNAPI) {
-    Interpreter::TfLiteDelegatePtr delegate = CreateNNAPIDelegate();
+  if (!delegate_providers) {
+    std::string error_message;
+    auto delegate = CreateTfLiteDelegate(params, &error_message);
     if (delegate) {
       delegates_.push_back(std::move(delegate));
+      LOG(INFO) << "Successfully created "
+                << params.Delegate_Name(params.delegate()) << " delegate.";
     } else {
-      LOG(WARNING) << "NNAPI not supported";
+      LOG(WARNING) << error_message;
     }
-  } else if (params.delegate() == TfliteInferenceParams::GPU) {
-    Interpreter::TfLiteDelegatePtr delegate = CreateGPUDelegate(model_.get());
-    if (delegate) {
-      delegates_.push_back(std::move(delegate));
-    } else {
-      LOG(WARNING) << "GPU not supported";
-    }
+  } else {
+    auto delegates = delegate_providers->CreateAllDelegates(params);
+    for (auto& one : delegates) delegates_.push_back(std::move(one));
   }
+
   for (int i = 0; i < delegates_.size(); ++i) {
     if (interpreter_->ModifyGraphWithDelegate(delegates_[i].get()) !=
         kTfLiteOk) {
-      LOG(FATAL) << "Failed to apply delegate %d" << i;
+      LOG(FATAL) << "Failed to apply delegate " << i;
     }
   }
-
   interpreter_->AllocateTensors();
-  model_info_ = GetTfliteModelInfo(*interpreter_);
-
-  outputs_.reserve(interpreter_->outputs().size());
-  for (int i : interpreter_->outputs()) {
-    TfLiteTensor* tensor = interpreter_->tensor(i);
-    outputs_.push_back(tensor->data.raw);
-  }
+  UpdateModelInfo();
 
   return kTfLiteOk;
 }
@@ -109,14 +132,17 @@ TfLiteStatus TfliteInferenceStage::Run() {
   // Copy input data.
   for (int i = 0; i < interpreter_->inputs().size(); ++i) {
     TfLiteTensor* tensor = interpreter_->tensor(interpreter_->inputs()[i]);
-    std::memcpy(tensor->data.raw, (*inputs_)[i], tensor->bytes);
+    tensor->data.raw = static_cast<char*>(inputs_->at(i));
   }
 
   // Invoke.
   auto& params = config_.specification().tflite_inference_params();
   for (int i = 0; i < params.invocations_per_run(); ++i) {
     int64_t start_us = profiling::time::NowMicros();
-    interpreter_->Invoke();
+    if (interpreter_->Invoke() != kTfLiteOk) {
+      LOG(ERROR) << "TFLite interpreter failed to invoke at run " << i;
+      return kTfLiteError;
+    }
     latency_stats_.UpdateStat(profiling::time::NowMicros() - start_us);
   }
 
@@ -133,6 +159,7 @@ EvaluationStageMetrics TfliteInferenceStage::LatestMetrics() {
   latency_metrics->set_min_us(latency_stats_.min());
   latency_metrics->set_sum_us(latency_stats_.sum());
   latency_metrics->set_avg_us(latency_stats_.avg());
+  latency_metrics->set_std_deviation_us(latency_stats_.std_deviation());
   metrics.set_num_runs(
       static_cast<int>(latency_stats_.count() / params.invocations_per_run()));
   auto* inference_metrics =

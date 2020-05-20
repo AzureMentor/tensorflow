@@ -1,26 +1,32 @@
+load("//tensorflow:tensorflow.bzl", "tf_cc_test", "tf_opts_nortti_if_lite_protos")
+
 #
 # This is a TF Lite delegate that is powered by TensorFlow's Eager.
 #
-package(default_visibility = [
-    "//visibility:private",
-])
-
-licenses(["notice"])  # Apache 2.0
-
-load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+package(
+    default_visibility = [
+        "//tensorflow/compiler/mlir/lite:__subpackages__",
+        "//tensorflow/lite/toco/tflite:__subpackages__",
+    ],
+    licenses = ["notice"],  # Apache 2.0
+)
 
 cc_library(
     name = "buffer_map",
     srcs = ["buffer_map.cc"],
     hdrs = ["buffer_map.h"],
+    copts = tf_opts_nortti_if_lite_protos(),
     deps = [
         ":util",
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite/c:common",
         "//tensorflow/lite:string",
         "//tensorflow/lite:string_util",
     ] + select({
         "//tensorflow:android": [
-            "//tensorflow/core:android_tensorflow_lib_lite",
+            "//tensorflow/core:portable_tensorflow_lib_lite",
+        ],
+        "//tensorflow:ios": [
+            "//tensorflow/core:portable_tensorflow_lib_lite",
         ],
         "//conditions:default": [
             "//tensorflow/c:c_api_internal",
@@ -57,11 +63,14 @@ cc_library(
         ":delegate_only_runtime",
     ] + select({
         "//tensorflow:android": [
-            "//tensorflow/core:android_tensorflow_lib",
+            "//tensorflow/core:portable_tensorflow_lib",
+        ],
+        "//tensorflow:ios": [
+            "//tensorflow/core:portable_tensorflow_lib",
         ],
         "//conditions:default": [
             "//tensorflow/core:tensorflow",
-            "//tensorflow/lite/c:c_api_internal",
+            "//tensorflow/lite/c:common",
         ],
     }),
     alwayslink = 1,
@@ -84,14 +93,17 @@ cc_library(
         ":kernel",
         ":util",
         "@com_google_absl//absl/strings:strings",
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite/c:common",
         "//tensorflow/lite:kernel_api",
         "//tensorflow/lite:minimal_logging",
         "//tensorflow/lite:string_util",
         "//tensorflow/lite:util",
     ] + select({
         "//tensorflow:android": [
-            "//tensorflow/core:android_tensorflow_lib_lite",
+            "//tensorflow/core:portable_tensorflow_lib_lite",
+        ],
+        "//tensorflow:ios": [
+            "//tensorflow/core:portable_tensorflow_lib_lite",
         ],
         "//conditions:default": [
             "//tensorflow/core:lib",
@@ -122,10 +134,14 @@ cc_library(
         "@com_google_absl//absl/memory",
     ] + select({
         "//tensorflow:android": [
-            "//tensorflow/core:android_tensorflow_lib_lite",
+            "//tensorflow/core:portable_tensorflow_lib_lite",
+        ],
+        "//tensorflow:ios": [
+            "//tensorflow/core:portable_tensorflow_lib_lite",
         ],
         "//conditions:default": [
             "//tensorflow/core/common_runtime/eager:context",
+            "//tensorflow/core/common_runtime/eager:core",
             "//tensorflow/core:core_cpu",
             "//tensorflow/core:lib",
         ],
@@ -140,7 +156,7 @@ tf_cc_test(
         ":delegate_data",
         "//tensorflow/lite:framework",
         "//tensorflow/lite:util",
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite/c:common",
         "//tensorflow/lite/testing:util",
         "@com_google_googletest//:gtest",
     ],
@@ -154,17 +170,20 @@ cc_library(
         ":delegate_data",
         ":util",
         "@flatbuffers",
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite/core/api",
+        "//tensorflow/lite/c:common",
         "//tensorflow/lite:kernel_api",
         "//tensorflow/lite:string",
         "//tensorflow/lite/kernels:kernel_util",
-        "//tensorflow/lite/profiling:profiler",
     ] + select({
         # TODO(b/111881878): The android_tensorflow_lib target pulls in the full
         # set of core TensorFlow kernels. We may want to revisit this dependency
         # to allow selective registration via build targets.
         "//tensorflow:android": [
-            "//tensorflow/core:android_tensorflow_lib_lite",
+            "//tensorflow/core:portable_tensorflow_lib_lite",
+        ],
+        "//tensorflow:ios": [
+            "//tensorflow/core:portable_tensorflow_lib_lite",
         ],
         "//conditions:default": [
             "//tensorflow/core/common_runtime/eager:context",
@@ -189,7 +208,10 @@ tf_cc_test(
         "@com_google_googletest//:gtest",
     ] + select({
         "//tensorflow:android": [
-            "//tensorflow/core:android_tensorflow_lib",
+            "//tensorflow/core:portable_tensorflow_lib",
+        ],
+        "//tensorflow:ios": [
+            "//tensorflow/core:portable_tensorflow_lib",
         ],
         "//conditions:default": [
             "//tensorflow/core:tensorflow",
@@ -216,11 +238,14 @@ cc_library(
     srcs = ["util.cc"],
     hdrs = ["util.h"],
     deps = [
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite/c:common",
         "//tensorflow/lite:kernel_api",
     ] + select({
         "//tensorflow:android": [
-            "//tensorflow/core:android_tensorflow_lib_lite",
+            "//tensorflow/core:portable_tensorflow_lib_lite",
+        ],
+        "//tensorflow:ios": [
+            "//tensorflow/core:portable_tensorflow_lib_lite",
         ],
         "//conditions:default": [
             "//tensorflow/c:c_api_internal",
@@ -239,5 +264,15 @@ tf_cc_test(
         "//tensorflow/lite:string",
         "//tensorflow/lite/testing:util",
         "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "whitelisted_flex_ops_lib",
+    srcs = [
+        "whitelisted_flex_ops.cc",
+    ],
+    hdrs = [
+        "whitelisted_flex_ops.h",
     ],
 )

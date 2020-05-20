@@ -4,6 +4,7 @@
 licenses(["notice"])
 
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts")
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -11,8 +12,12 @@ exports_files(["LICENSE"])
 
 cc_library(
     name = "tensorrt_headers",
-    hdrs = [":tensorrt_include"],
-    visibility = ["//visibility:public"],
+    hdrs = [
+        "tensorrt/include/tensorrt_config.h",
+        ":tensorrt_include"
+    ],
+    include_prefix = "third_party/tensorrt",
+    strip_include_prefix = "tensorrt/include",
 )
 
 cc_library(
@@ -21,10 +26,17 @@ cc_library(
     copts = cuda_default_copts(),
     data = [":tensorrt_lib"],
     linkstatic = 1,
-    visibility = ["//visibility:public"],
     deps = [
         ":tensorrt_headers",
         "@local_config_cuda//cuda",
+    ],
+)
+
+bzl_library(
+    name = "build_defs_bzl",
+    srcs = ["build_defs.bzl"],
+    deps = [
+        "@bazel_skylib//lib:selects",
     ],
 )
 

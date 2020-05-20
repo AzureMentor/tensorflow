@@ -16,8 +16,6 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_DELEGATES_GPU_GL_EGL_CONTEXT_H_
 #define TENSORFLOW_LITE_DELEGATES_GPU_GL_EGL_CONTEXT_H_
 
-#include <vector>
-
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/gl/portable_egl.h"
 
@@ -37,10 +35,15 @@ class EglContext {
   EglContext()
       : context_(EGL_NO_CONTEXT),
         display_(EGL_NO_DISPLAY),
-        config_(EGL_NO_CONFIG_KHR) {}
+        config_(EGL_NO_CONFIG_KHR),
+        has_ownership_(false) {}
 
-  EglContext(EGLContext context, EGLDisplay display, EGLConfig config)
-      : context_(context), display_(display), config_(config) {}
+  EglContext(EGLContext context, EGLDisplay display, EGLConfig config,
+             bool has_ownership)
+      : context_(context),
+        display_(display),
+        config_(config),
+        has_ownership_(has_ownership) {}
 
   // Move only
   EglContext(EglContext&& other);
@@ -58,14 +61,18 @@ class EglContext {
 
   // Make this EglContext the current EGL context on this thread, replacing
   // the existing current.
-  Status MakeCurrent(EGLSurface read, EGLSurface write);
+  absl::Status MakeCurrent(EGLSurface read, EGLSurface write);
 
-  Status MakeCurrentSurfaceless() {
+  absl::Status MakeCurrentSurfaceless() {
     return MakeCurrent(EGL_NO_SURFACE, EGL_NO_SURFACE);
   }
 
   // Returns true if this is the currently bound EGL context.
   bool IsCurrent() const;
+
+  // Returns true if this object actually owns corresponding EGL context
+  // and manages it's lifetime.
+  bool has_ownership() const { return has_ownership_; }
 
  private:
   void Invalidate();
@@ -73,18 +80,22 @@ class EglContext {
   EGLContext context_;
   EGLDisplay display_;
   EGLConfig config_;
+
+  bool has_ownership_;
 };
 
 // It uses the EGL_KHR_no_config_context extension to create a no config context
 // since most modern hardware supports the extension.
-Status CreateConfiglessContext(EGLDisplay display, EGLContext shared_context,
-                               EglContext* egl_context);
+absl::Status CreateConfiglessContext(EGLDisplay display,
+                                     EGLContext shared_context,
+                                     EglContext* egl_context);
 
-Status CreateSurfacelessContext(EGLDisplay display, EGLContext shared_context,
-                                EglContext* egl_context);
+absl::Status CreateSurfacelessContext(EGLDisplay display,
+                                      EGLContext shared_context,
+                                      EglContext* egl_context);
 
-Status CreatePBufferContext(EGLDisplay display, EGLContext shared_context,
-                            EglContext* egl_context);
+absl::Status CreatePBufferContext(EGLDisplay display, EGLContext shared_context,
+                                  EglContext* egl_context);
 
 }  // namespace gl
 }  // namespace gpu

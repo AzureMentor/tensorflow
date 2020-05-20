@@ -165,19 +165,33 @@ bool DeleteArrayIfUnused(const string& array_name, Model* model) {
   return false;
 }
 
-bool DeleteArrayIfUsedOnce(const string& array_name, Model* model) {
-  if (IsDiscardableArray(*model, array_name) &&
-      CountOpsWithInput(*model, array_name) == 1 &&
-      GetOpWithOutput(*model, array_name) == nullptr) {
-    model->EraseArray(array_name);
-    return true;
+bool DeleteArrayIfUnusedOutsideOfOp(const string& array_name,
+                                    const Operator* op, Model* model) {
+  if (!IsDiscardableArray(*model, array_name)) {
+    return false;
   }
-  return false;
+  if (CountOpsWithInput(*model, array_name) > 1) {
+    return false;
+  }
+  const Operator* op_having_this_as_input = GetOpWithInput(*model, array_name);
+  if (op_having_this_as_input && op_having_this_as_input != op) {
+    return false;
+  }
+  const Operator* op_having_this_as_output =
+      GetOpWithOutput(*model, array_name);
+  if (op_having_this_as_output && op_having_this_as_output != op) {
+    return false;
+  }
+  model->EraseArray(array_name);
+  return true;
 }
 
-void DeleteOpAndArraysIfUnused(Model* model, const Operator* op) {
+void DeleteOpAndArrays(Model* model, const Operator* op) {
   for (const string& array_name : op->inputs) {
-    DeleteArrayIfUsedOnce(array_name, model);
+    DeleteArrayIfUnusedOutsideOfOp(array_name, op, model);
+  }
+  for (const string& array_name : op->outputs) {
+    DeleteArrayIfUnusedOutsideOfOp(array_name, op, model);
   }
   auto op_it = FindOp(*model, op);
   CHECK(op_it != model->operators.end());
@@ -322,6 +336,7 @@ const char* OperatorTypeName(OperatorType type) {
     HANDLE_OPERATORTYPENAME_CASE(DepthToSpace)
     HANDLE_OPERATORTYPENAME_CASE(SpaceToDepth)
     HANDLE_OPERATORTYPENAME_CASE(FullyConnected)
+    HANDLE_OPERATORTYPENAME_CASE(HardSwish)
     HANDLE_OPERATORTYPENAME_CASE(Dequantize)
     HANDLE_OPERATORTYPENAME_CASE(L2Normalization)
     HANDLE_OPERATORTYPENAME_CASE(LocalResponseNormalization)
@@ -372,6 +387,7 @@ const char* OperatorTypeName(OperatorType type) {
     HANDLE_OPERATORTYPENAME_CASE(Reshape)
     HANDLE_OPERATORTYPENAME_CASE(Squeeze)
     HANDLE_OPERATORTYPENAME_CASE(Rsqrt)
+    HANDLE_OPERATORTYPENAME_CASE(SegmentSum)
     HANDLE_OPERATORTYPENAME_CASE(Shape)
     HANDLE_OPERATORTYPENAME_CASE(Slice)
     HANDLE_OPERATORTYPENAME_CASE(Split)
@@ -389,6 +405,7 @@ const char* OperatorTypeName(OperatorType type) {
     HANDLE_OPERATORTYPENAME_CASE(Cast)
     HANDLE_OPERATORTYPENAME_CASE(Floor)
     HANDLE_OPERATORTYPENAME_CASE(Ceil)
+    HANDLE_OPERATORTYPENAME_CASE(Round)
     HANDLE_OPERATORTYPENAME_CASE(Gather)
     HANDLE_OPERATORTYPENAME_CASE(GatherNd)
     HANDLE_OPERATORTYPENAME_CASE(ResizeBilinear)
@@ -431,6 +448,11 @@ const char* OperatorTypeName(OperatorType type) {
     HANDLE_OPERATORTYPENAME_CASE(ReverseSequence)
     HANDLE_OPERATORTYPENAME_CASE(MatrixDiag)
     HANDLE_OPERATORTYPENAME_CASE(MatrixSetDiag)
+    HANDLE_OPERATORTYPENAME_CASE(MatrixDiagV2)
+    HANDLE_OPERATORTYPENAME_CASE(MatrixSetDiagV2)
+    HANDLE_OPERATORTYPENAME_CASE(MatrixDiagV3)
+    HANDLE_OPERATORTYPENAME_CASE(MatrixSetDiagV3)
+    HANDLE_OPERATORTYPENAME_CASE(ScatterNd)
     default:
       LOG(FATAL) << "Unhandled op type";
 #undef HANDLE_OPERATORTYPENAME_CASE
@@ -908,7 +930,7 @@ void CheckNonExistentIOArrays(const Model& model) {
   }
   static constexpr char general_comment[] =
       "Is it a typo? This should not happen. If you trigger this error "
-      "please send a bug report (with code to reporduce this error), to the "
+      "please send a bug report (with code to reproduce this error), to the "
       "TensorFlow Lite team.";
   for (const string& output_array : model.flags.output_arrays()) {
     if (IsConstantParameterArray(model, output_array)) {
@@ -1031,18 +1053,20 @@ void CheckEachArray(const Model& model) {
     const auto& array = array_entry.second;
     // It's OK to have a buffer or an alloc, but not both.
     // (Since allocs are for transient arrays without a buffer).
-    CHECK(!array->buffer || !array->alloc);
+    CHECK(!array->buffer || !array->alloc) << "Tensor: " << array_entry.first;
     if (array->buffer) {
       // If there is a buffer, its type should be consistent with data_type.
-      CHECK(array->buffer->type == array->data_type);
+      CHECK(array->buffer->type == array->data_type)
+          << "Tensor: " << array_entry.first;
       // The presence of a fixed buffer should imply the presence of a fixed
       // shape.
-      CHECK(array->has_shape());
+      CHECK(array->has_shape()) << array_entry.first;
       // Constant buffer should has a valid shape.
       CheckValidShape(array->shape());
       // The shape flat-size should agree with the buffer length.
       CHECK_EQ(array->buffer->Length(),
-               RequiredBufferSizeForShape(array->shape()));
+               RequiredBufferSizeForShape(array->shape()))
+          << "Tensor: " << array_entry.first;
     }
 
     // Check name.  Either "name_with_suffix_8", "name_with_port:3", but not
@@ -1743,6 +1767,8 @@ int ElementSize(ArrayDataType data_type) {
       return 8;
     case ArrayDataType::kComplex64:
       return 8;
+    case ArrayDataType::kFloat64:
+      return 8;
 
     // Usually not critical limitation because strings are only input and/or
     // output.
@@ -2284,6 +2310,10 @@ ArrayDataType ConvertIODataTypeToArrayDataType(IODataType type) {
       return ArrayDataType::kString;
     case COMPLEX64:
       return ArrayDataType::kComplex64;
+    case FLOAT16:
+      return ArrayDataType::kFloat16;
+    case FLOAT64:
+      return ArrayDataType::kFloat64;
     default:
       return ArrayDataType::kNone;
   }
@@ -2329,6 +2359,12 @@ std::unordered_set<string> ScanArrayNames(
 void UseArraysExtraInfo(Model* model, bool quantize_output) {
   for (const auto& entry : model->flags.arrays_extra_info().entries()) {
     const auto matches = ScanArrayNames(*model, entry);
+    if (matches.empty()) {
+      LOG(ERROR) << "arrays_extra_info_file: No matching arrays found for "
+                 << (entry.has_name() ? entry.name() : "")
+                 << (entry.has_name_regexp() ? entry.name_regexp() : "");
+      continue;
+    }
     for (const auto& matched_name : matches) {
       auto& array = model->GetArray(matched_name);
       if (entry.has_min() || entry.has_max()) {

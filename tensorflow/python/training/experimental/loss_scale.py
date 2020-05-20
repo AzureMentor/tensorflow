@@ -31,22 +31,51 @@ from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.training.tracking import base as trackable
 from tensorflow.python.ops import variable_scope
+from tensorflow.python.util import deprecation
+from tensorflow.python.util import nest
+from tensorflow.python.util.tf_export import tf_export
 
 
-# TODO(reedwm): Merge this with tf.keras.mixed_precision.experimental.LossScale
 @six.add_metaclass(abc.ABCMeta)
+@deprecation.deprecated_endpoints('train.experimental.LossScale')
+@tf_export('mixed_precision.experimental.LossScale',
+           'train.experimental.LossScale')
 class LossScale(trackable.Trackable):
-  """Loss scale base class.
+  """Base class for all loss scales.
+
+  This is an abstract base class, so you cannot instantiate it directly.
+  Instead, use one of its concrete subclasses:
+    * `tf.mixed_precision.experimental.DynamicLossScale` (recommended)
+    * `tf.mixed_precision.experimental.FixedLossScale`
+
+  It's recommended to use a loss scale with a
+  `tf.keras.mixed_precision.experimental.LossScaleOptimizer`, as its easier than
+  using a loss scale directly.
+
+  Loss scaling is a process that multiplies the loss by a multiplier called the
+  loss scale, and divides each gradient by the same multiplier. The pseudocode
+  for this process is:
+
+  ```
+  loss = ...
+  loss *= loss_scale
+  grads = gradients(loss, vars)
+  grads /= loss_scale
+  ```
+
+  Mathematically, loss scaling has no effect, but can help avoid numerical
+  underflow in intermediate gradients when float16 tensors are used for mixed
+  precision training. By multiplying the loss, each intermediate gradient will
+  have the same multiplier applied.
 
   Instances of this class represent a loss scale. Calling instances of this
   class returns the loss scale as a scalar float32 tensor, while method
   `update()` updates the loss scale depending on the values of the gradients.
   Optimizers use instances of this class to scale loss and gradients.
 
-  Note: this LossScale class can only be used with a v1 optimizer wrapper,
-  tf.train.experimental.MixedPrecisionLossScaleOptimizer. For a v2
-  wrapper, tf.keras.mixed_precision.experimental.LossScaleOptimizer, a
-  tf.keras.mixed_precision.experimental.LossScale should be used instead.
+  In most functions that accept a LossScale, you can also pass an int (such as
+  8) to create a `FixedLossScale` or the string `"dynamic"` to create a dynamic
+  loss scale.
   """
 
   def __init__(self):
@@ -81,10 +110,10 @@ class LossScale(trackable.Trackable):
     cross-replica context.
 
     Args:
-      grads: A list of unscaled gradients, each which is the gradient of the
-        loss with respect to a weight. The gradients should have already been
-        divided by the loss scale being before passed to this function. 'None'
-        gradients are accepted, and are ignored.
+      grads: A nested structure of unscaled gradients, each which is the
+        gradient of the loss with respect to a weight. The gradients should have
+        already been divided by the loss scale being before passed to this
+        function. 'None' gradients are accepted, and are ignored.
 
     Returns:
       update_op: In eager mode, None. In graph mode, an op to update the loss
@@ -96,7 +125,7 @@ class LossScale(trackable.Trackable):
     pass
 
   def _add_weight(self, name, initial_value, dtype=None):
-    """Adds a weight to this loss scale manager..
+    """Adds a weight to this loss scale.
 
     Args:
       name: Variable name.
@@ -158,11 +187,29 @@ class LossScale(trackable.Trackable):
       graph_key = graph._graph_key  # pylint: disable=protected-access
     return self._weights.get((name, graph_key), None)
 
+  @abc.abstractmethod
+  def get_config(self):
+    """Returns the config of this loss scale."""
+    pass
 
+  @classmethod
+  def from_config(cls, config):
+    """Creates the LossScale from its config."""
+    return cls(**config)
+
+
+def get_loss_scale_weights(loss_scale):
+  return loss_scale._weights.values()  # pylint: disable=protected-access
+
+
+@deprecation.deprecated_endpoints('train.experimental.FixedLossScale')
+@tf_export('mixed_precision.experimental.FixedLossScale',
+           'train.experimental.FixedLossScale')
 class FixedLossScale(LossScale):
-  """Loss scale class with a fixed value.
+  """Loss scale with a fixed value.
 
-  The loss scale is not updated for the lifetime of the class.
+  The loss scale is not updated for the lifetime of instances of this class.
+  A given instance of this class always returns the same number when called.
   """
 
   def __init__(self, loss_scale_value):
@@ -176,22 +223,33 @@ class FixedLossScale(LossScale):
         number as long as no nan or inf is encountered in training.
 
     Raises:
-      ValueError: If loss_scale is less than 1.
+      ValueError: If loss_scale_value is less than 1.
     """
     super(FixedLossScale, self).__init__()
     if not isinstance(loss_scale_value, six.integer_types + (float,)):
-      raise ValueError('loss_scale must be a Python int or float.')
+      raise ValueError('loss_scale_value must be a Python int or float.')
     if loss_scale_value < 1:
-      raise ValueError('loss scale must be at least 1.')
-    self._tensor_loss_scale = ops.convert_to_tensor(
-        loss_scale_value, dtype=dtypes.float32)
+      raise ValueError('loss_scale_value must be at least 1.')
+    # It's important we do not create tensors in the constructor, as such
+    # tensors might be on a different device or tf.function vs when the tensor
+    # is used. This would hurt performance. Therefore, we do not create a tensor
+    # from loss_scale_value, but instead leave it as a Python float.
+    # TODO(reedwm): Also do not create tensors in the DynamicLossScale
+    # constructor.
+    self._loss_scale_value = float(loss_scale_value)
 
   def __call__(self):
-    return self._tensor_loss_scale
+    return ops.convert_to_tensor(self._loss_scale_value)
 
   def update(self, grads):
     del grads
     return control_flow_ops.no_op(), True
+
+  def __repr__(self):
+    return 'FixedLossScale(%s)' % self._loss_scale_value
+
+  def get_config(self):
+    return {'loss_scale_value': self._loss_scale_value}
 
 
 def _is_all_finite(grads):
@@ -226,8 +284,11 @@ def _assign_if_finite(var, value):
       control_flow_ops.no_op)
 
 
+@deprecation.deprecated_endpoints('train.experimental.DynamicLossScale')
+@tf_export('mixed_precision.experimental.DynamicLossScale',
+           'train.experimental.DynamicLossScale')
 class DynamicLossScale(LossScale):
-  """Loss scale class that dynamically adjusts the loss scale.
+  """Loss scale that dynamically adjusts itself.
 
   Dynamic loss scaling works by adjusting the loss scale as training progresses.
   The goal is to keep the loss scale as high as possible without overflowing the
@@ -243,16 +304,16 @@ class DynamicLossScale(LossScale):
   """
 
   def __init__(self,
-               initial_loss_scale=2**15,
+               initial_loss_scale=2 ** 15,  # See docstring for why this is big.
                increment_period=2000,
                multiplier=2.):
-    """Constructor of exponential-update loss scale class.
+    """Creates the dynamic loss scale.
 
     Args:
       initial_loss_scale: A Python float.  The loss scale to use at the
         beginning. It's better to start this at a very high number, because a
         loss scale that is too high gets lowered far more quickly than a loss
-        scale that is to low gets raised. The default is 2 ** 15, which is
+        scale that is too low gets raised. The default is 2 ** 15, which is
         approximately half the maximum float16 value.
       increment_period: Increases loss scale every `increment_period`
         consecutive steps that finite gradients are encountered. If a nonfinite
@@ -266,7 +327,7 @@ class DynamicLossScale(LossScale):
     self._multiplier = float(multiplier)
 
     self._current_loss_scale = self._add_weight(
-        name='loss_scale',
+        name='current_loss_scale',
         dtype=dtypes.float32,
         initial_value=self._initial_loss_scale)
     # The number of consecutive steps with finite gradients since the last
@@ -287,10 +348,11 @@ class DynamicLossScale(LossScale):
     return self._multiplier
 
   def __call__(self):
-    return self._current_loss_scale
+    return ops.convert_to_tensor(self._current_loss_scale)
 
   def update(self, grads):
     """Updates loss scale based on if gradients are finite in current step."""
+    grads = nest.flatten(grads)
     if distribution_strategy_context.has_strategy():
       distribution = distribution_strategy_context.get_cross_replica_context()
 
@@ -336,6 +398,24 @@ class DynamicLossScale(LossScale):
                                       update_if_not_finite_grads)
     should_apply_gradients = is_finite
     return update_op, should_apply_gradients
+
+  def __repr__(self):
+    if context.executing_eagerly():
+      return ('DynamicLossScale(current_loss_scale=%s, num_good_steps=%s, '
+              'initial_loss_scale=%s, increment_period=%s, multiplier=%s)' %
+              (self._current_loss_scale.numpy(), self._num_good_steps.numpy(),
+               self.initial_loss_scale, self.increment_period, self.multiplier))
+    else:
+      return ('DynamicLossScale(initial_loss_scale=%s, increment_period=%s, '
+              'multiplier=%s)' %
+              (self.initial_loss_scale, self.increment_period, self.multiplier))
+
+  def get_config(self):
+    return {
+        'initial_loss_scale': self.initial_loss_scale,
+        'increment_period': self.increment_period,
+        'multiplier': self.multiplier,
+    }
 
 
 def get(identifier):

@@ -207,14 +207,14 @@ TEST_F(ReadyNodeManagerTest, AddAndRemoveMultipleLIFOManager) {
 
 TEST_F(ReadyNodeManagerTest, GetSingleNodeFirstReadyManager) {
   FirstReadyManager manager;
-  manager.Init(&node_states_);
+  TF_EXPECT_OK(manager.Init(&node_states_));
   manager.AddNode(&node1_);
   EXPECT_EQ(manager.GetCurrNode()->name(), "Node1");
 }
 
 TEST_F(ReadyNodeManagerTest, RemoveSingleNodeFirstReadyManager) {
   FirstReadyManager manager;
-  manager.Init(&node_states_);
+  TF_EXPECT_OK(manager.Init(&node_states_));
   manager.AddNode(&node1_);
   manager.RemoveCurrNode();
   EXPECT_TRUE(manager.Empty());
@@ -222,7 +222,7 @@ TEST_F(ReadyNodeManagerTest, RemoveSingleNodeFirstReadyManager) {
 
 TEST_F(ReadyNodeManagerTest, GetAndRemoveMultipleFirstReadyManager) {
   FirstReadyManager manager;
-  manager.Init(&node_states_);
+  TF_EXPECT_OK(manager.Init(&node_states_));
   // Insert nodes in some random order.
   manager.AddNode(&node2_);
   manager.AddNode(&node1_);
@@ -250,7 +250,7 @@ TEST_F(ReadyNodeManagerTest, GetAndRemoveMultipleFirstReadyManager) {
 
 TEST_F(ReadyNodeManagerTest, GetCurrNodeFirstReadyManager) {
   FirstReadyManager manager;
-  manager.Init(&node_states_);
+  TF_EXPECT_OK(manager.Init(&node_states_));
 
   // Inserts nodes in some random order.
   manager.AddNode(&node2_);
@@ -264,7 +264,7 @@ TEST_F(ReadyNodeManagerTest, GetCurrNodeFirstReadyManager) {
   // should return it.
   EXPECT_EQ("Node6", manager.GetCurrNode()->name());
 
-  // Now insrets a few other nodes, but their time_ready's are even smaller than
+  // Now inserts a few other nodes, but their time_ready's are even smaller than
   // that of Node6. Before calling RemoveCurrNode(), GetCurrNode() should return
   // the same node, Node6, in this case.
   NodeDef node7;
@@ -308,9 +308,9 @@ TEST_F(ReadyNodeManagerTest, GetCurrNodeFirstReadyManager) {
 
 TEST_F(ReadyNodeManagerTest, DeterminismInFirstReadyManager) {
   FirstReadyManager manager1;
-  manager1.Init(&node_states_);
+  TF_EXPECT_OK(manager1.Init(&node_states_));
   FirstReadyManager manager2;
-  manager2.Init(&node_states_);
+  TF_EXPECT_OK(manager2.Init(&node_states_));
 
   // 6 nodes with same time_ready.
   NodeDef node7;
@@ -372,17 +372,52 @@ TEST_F(ReadyNodeManagerTest, DeterminismInFirstReadyManager) {
   EXPECT_TRUE(manager2.Empty());
 }
 
+TEST_F(ReadyNodeManagerTest, GetAndRemoveMultiplePriorityReadyManager) {
+  PriorityReadyManager manager;
+  TF_EXPECT_OK(manager.Init(&node_states_));
+
+  // Sets up node priorities.
+  std::unordered_map<string, int> node_priority = {
+      {"Node1", 1}, {"Node2", 2}, {"Node3", 2}, {"Node4", 4}, {"Node5", 5}};
+  TF_EXPECT_OK(manager.SetPriority(node_priority));
+
+  // Inserts nodes in some random order.
+  manager.AddNode(&node3_);
+  manager.AddNode(&node1_);
+  manager.AddNode(&node4_);
+  manager.AddNode(&node5_);
+  manager.AddNode(&node2_);
+  manager.AddNode(&node6_);
+
+  // Expects nodes scheduled based on priority.
+  // Node6 should default to lowest priority, since it is not found.
+  EXPECT_EQ(manager.GetCurrNode()->name(), "Node6");
+  manager.RemoveCurrNode();
+  EXPECT_EQ(manager.GetCurrNode()->name(), "Node1");
+  manager.RemoveCurrNode();
+  // Nodes 2 and 3 have equal priority and so should be scheduled ready-first.
+  EXPECT_EQ(manager.GetCurrNode()->name(), "Node3");
+  manager.RemoveCurrNode();
+  EXPECT_EQ(manager.GetCurrNode()->name(), "Node2");
+  manager.RemoveCurrNode();
+  EXPECT_EQ(manager.GetCurrNode()->name(), "Node4");
+  manager.RemoveCurrNode();
+  EXPECT_EQ(manager.GetCurrNode()->name(), "Node5");
+  manager.RemoveCurrNode();
+  EXPECT_TRUE(manager.Empty());
+}
+
 TEST_F(ReadyNodeManagerTest, RemoveSingleNodeCompositeNodeManager) {
   CompositeNodeManager manager;
-  manager.Init(&node_states_);
+  TF_EXPECT_OK(manager.Init(&node_states_));
   manager.AddNode(&node1_);
   manager.RemoveCurrNode();
   EXPECT_TRUE(manager.Empty());
 }
 
-TEST_F(ReadyNodeManagerTest, GetAndRemoveMultipleComopsiteNodeManager) {
+TEST_F(ReadyNodeManagerTest, GetAndRemoveMultipleCompositeNodeManager) {
   CompositeNodeManager manager;
-  manager.Init(&node_states_);
+  TF_EXPECT_OK(manager.Init(&node_states_));
   manager.AddNode(&node1_);
   manager.AddNode(&node2_);
   manager.AddNode(&node3_);
@@ -410,9 +445,9 @@ TEST_F(ReadyNodeManagerTest, GetAndRemoveMultipleComopsiteNodeManager) {
   EXPECT_TRUE(manager.Empty());
 }
 
-TEST_F(ReadyNodeManagerTest, MultiDeviceSendRecvComopsiteNodeManager) {
+TEST_F(ReadyNodeManagerTest, MultiDeviceSendRecvCompositeNodeManager) {
   CompositeNodeManager manager;
-  manager.Init(&node_states_);
+  TF_EXPECT_OK(manager.Init(&node_states_));
   // Additional nodes on kCPU1.
   NodeDef node7;
   NodeDef node8;
@@ -491,9 +526,9 @@ TEST_F(ReadyNodeManagerTest, MultiDeviceSendRecvComopsiteNodeManager) {
 
 TEST_F(ReadyNodeManagerTest, DeterminismInCompositeNodeManager) {
   CompositeNodeManager manager;
-  manager.Init(&node_states_);
+  TF_EXPECT_OK(manager.Init(&node_states_));
   CompositeNodeManager manager2;
-  manager2.Init(&node_states_);
+  TF_EXPECT_OK(manager2.Init(&node_states_));
 
   // 6 nodes with same time_ready.
   NodeDef node7;
@@ -591,10 +626,10 @@ class TestVirtualScheduler : public VirtualScheduler {
  public:
   TestVirtualScheduler(const bool use_static_shapes,
                        const bool use_aggressive_shape_inference,
-                       Cluster* cluster)
+                       ReadyNodeManager* ready_node_manager, Cluster* cluster)
       : VirtualScheduler(
             use_static_shapes, use_aggressive_shape_inference, cluster,
-            &ready_node_manager_,
+            ready_node_manager,
             absl::make_unique<VirtualPlacer>(cluster->GetDevices())) {
     enable_mem_usage_tracking();
   }
@@ -604,9 +639,6 @@ class TestVirtualScheduler : public VirtualScheduler {
   FRIEND_TEST(VirtualSchedulerTest, ComplexDependency);
   FRIEND_TEST(VirtualSchedulerTest, Variable);
   FRIEND_TEST(VirtualSchedulerTest, InterDeviceTransfer);
-
- protected:
-  FirstReadyManager ready_node_manager_;
 };
 
 class VirtualSchedulerTest : public ::testing::Test {
@@ -625,7 +657,8 @@ class VirtualSchedulerTest : public ::testing::Test {
     cluster_ = absl::make_unique<VirtualCluster>(devices);
     scheduler_ = absl::make_unique<TestVirtualScheduler>(
         /*use_static_shapes=*/true,
-        /*use_aggressive_shape_inference=*/true, cluster_.get());
+        /*use_aggressive_shape_inference=*/true, &first_ready_manager_,
+        cluster_.get());
   }
 
   DeviceProperties GetDummyCPUDevice() {
@@ -655,12 +688,10 @@ class VirtualSchedulerTest : public ::testing::Test {
     auto c0 = ops::Conv2D(s.WithOpName("c0"), x, f, strides, "SAME");
     auto c1 = ops::Conv2D(s.WithOpName("c1"), y, f, strides, "SAME");
     auto c2 = ops::Conv2D(s.WithOpName("c2"), z, f, strides, "SAME");
-    GraphDef def;
-    TF_CHECK_OK(s.ToGraphDef(&def));
 
-    grappler_item_.reset(new GrapplerItem);
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+    TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
     grappler_item_->id = "test_conv2d_graph";
-    grappler_item_->graph = def;
     grappler_item_->fetch = {"c0", "c1"};
 
     dependency_["c0"] = {"x", "f"};
@@ -676,12 +707,11 @@ class VirtualSchedulerTest : public ::testing::Test {
                            {kernel_, kernel_, depth_in_, depth_out_}, DT_FLOAT);
     std::vector<int> strides = {1, 1, 1, 1};
     auto y = ops::Conv2D(s.WithOpName("y"), x, f, strides, "SAME");
-    GraphDef def;
-    TF_CHECK_OK(s.ToGraphDef(&def));
 
-    grappler_item_.reset(new GrapplerItem);
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+    TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
     grappler_item_->id = "test_conv2d_var_graph";
-    grappler_item_->graph = def;
+
     grappler_item_->fetch = {"y"};
 
     dependency_["y"] = {"x", "f"};
@@ -706,12 +736,9 @@ class VirtualSchedulerTest : public ::testing::Test {
     auto abcd = ops::MatMul(s.WithOpName("abcd"), abc, d);
     auto abcde = ops::MatMul(s.WithOpName("abcde"), abcd, e);
 
-    GraphDef def;
-    TF_CHECK_OK(s.ToGraphDef(&def));
-
-    grappler_item_.reset(new GrapplerItem);
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+    TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
     grappler_item_->id = "test_matmul_sequence_graph";
-    grappler_item_->graph = def;
     grappler_item_->fetch = {"abcde"};
 
     dependency_["ab"] = {"a", "b"};
@@ -729,12 +756,10 @@ class VirtualSchedulerTest : public ::testing::Test {
     auto w = ops::RandomUniform(s.WithOpName("w"), {10, 10, 10, 10}, DT_FLOAT);
     OutputList input_tensors = {x, y, z, w};
     auto out = ops::AddN(s.WithOpName("out"), input_tensors);
-    GraphDef def;
-    TF_CHECK_OK(s.ToGraphDef(&def));
 
-    grappler_item_.reset(new GrapplerItem);
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+    TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
     grappler_item_->id = "test_addn_graph";
-    grappler_item_->graph = def;
     grappler_item_->fetch = {"out"};
 
     dependency_["out"] = {"x", "y", "z", "w"};
@@ -746,12 +771,10 @@ class VirtualSchedulerTest : public ::testing::Test {
     auto unnecessary = ops::Placeholder(s.WithOpName("unnecessary"), DT_FLOAT);
     auto x = ops::Placeholder(s.WithOpName("x"), DT_FLOAT);
 
-    GraphDef def;
-    TF_CHECK_OK(s.ToGraphDef(&def));
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+    TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
 
-    grappler_item_.reset(new GrapplerItem);
     grappler_item_->id = "test_extra_placeholders";
-    grappler_item_->graph = def;
     grappler_item_->fetch = {"x"};
 
     // Grappler Item Builder puts all placeholder nodes into the feed
@@ -770,15 +793,60 @@ class VirtualSchedulerTest : public ::testing::Test {
     }
     auto out =
         ops::NoOp(s.WithControlDependencies(input_tensors).WithOpName("out"));
-    GraphDef def;
-    TF_CHECK_OK(s.ToGraphDef(&def));
 
-    grappler_item_.reset(new GrapplerItem);
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+    TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
+
     grappler_item_->id = "test_control_dependency_graph";
-    grappler_item_->graph = def;
     grappler_item_->fetch = {"out"};
 
     dependency_["out"] = input_noop_names;
+  }
+
+  void CreateGrapplerItemWithAddFromOneTensor() {
+    Scope s = Scope::NewRootScope().WithDevice(kCPU0);
+    auto x = tensorflow::ops::RandomUniform(
+        s.WithOpName("x"), {batch_size_, width_, height_, depth_in_}, DT_FLOAT);
+
+    auto y = tensorflow::ops::Add(s.WithOpName("y"), x, x);
+    Output fetch = ops::Identity(s.WithOpName("fetch"), y);
+
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+    TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
+
+    grappler_item_->id = "test_add_from_one_tensor";
+    grappler_item_->fetch = {"fetch"};
+
+    dependency_["fetch"] = {"y"};
+    dependency_["y"] = {"x"};
+  }
+
+  void CreateGrapplerItemWithSwitchMergeInput() {
+    // sw = Switch(x, pred)
+    // a = Add(S:1, b)
+    // m = Merge(sw:0, a)
+    // y = Add(m, z)
+
+    Scope s = Scope::NewRootScope().WithDevice(kCPU0);
+    auto x = ops::RandomUniform(
+        s.WithOpName("x"), {batch_size_, width_, height_, depth_in_}, DT_FLOAT);
+    auto pred = ops::Const(s.WithOpName("pred"), false, {});
+    auto sw = ops::Switch(s.WithOpName("switch"), x, pred);
+    auto b = ops::RandomUniform(
+        s.WithOpName("b"), {batch_size_, width_, height_, depth_in_}, DT_FLOAT);
+    auto a = ops::Add(s.WithOpName("a"), sw.output_true, b);
+    auto m = ops::Merge(s.WithOpName("m"), {sw.output_false, a.z});
+    auto z = ops::RandomUniform(
+        s.WithOpName("z"), {batch_size_, width_, height_, depth_in_}, DT_FLOAT);
+    auto y = ops::Add(s.WithOpName("y"), m.output, z);
+
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+    TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
+
+    grappler_item_->id = "test_add_merge_switch";
+    grappler_item_->fetch = {"y"};
+
+    dependency_["y"] = {"m", "z"};
   }
 
   // FusedBN [an op with multiple outputs] with multiple consumers (including
@@ -812,12 +880,10 @@ class VirtualSchedulerTest : public ::testing::Test {
     };
     auto z4 = ops::NoOp(s.WithControlDependencies(batch_var).WithOpName("z4"));
 
-    GraphDef def;
-    TF_CHECK_OK(s.ToGraphDef(&def));
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+    TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
 
-    grappler_item_.reset(new GrapplerItem);
     grappler_item_->id = "test_complex_dependency_graph";
-    grappler_item_->graph = def;
     grappler_item_->fetch = {"z1", "z2", "z3", "z4"};
 
     dependency_["bn"] = {"x", "scale", "offset", "mean", "var"};
@@ -941,7 +1007,8 @@ versions {
 }
     )EOF";
 
-    grappler_item_.reset(new GrapplerItem);
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+
     CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii,
                                                 &grappler_item_->graph));
     grappler_item_->id = "test_graph";
@@ -998,7 +1065,7 @@ versions {
 }
     )EOF";
 
-    grappler_item_.reset(new GrapplerItem);
+    grappler_item_ = absl::make_unique<GrapplerItem>();
     CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii,
                                                 &grappler_item_->graph));
     grappler_item_->id = "test_graph";
@@ -1394,7 +1461,7 @@ versions {
 }
   )EOF";
 
-    grappler_item_.reset(new GrapplerItem);
+    grappler_item_ = absl::make_unique<GrapplerItem>();
     CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii,
                                                 &grappler_item_->graph));
     grappler_item_->id = "test_graph";
@@ -2061,7 +2128,7 @@ versions {
   producer: 27
 })EOF";
 
-    grappler_item_.reset(new GrapplerItem);
+    grappler_item_ = absl::make_unique<GrapplerItem>();
     CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii,
                                                 &grappler_item_->graph));
     grappler_item_->id = "test_graph";
@@ -2102,12 +2169,9 @@ versions {
                                      .WithControlDependencies(y)
                                      .WithDevice(kCPU1));
 
-    GraphDef def;
-    TF_CHECK_OK(s.ToGraphDef(&def));
-
-    grappler_item_.reset(new GrapplerItem);
+    grappler_item_ = absl::make_unique<GrapplerItem>();
+    TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
     grappler_item_->id = "test_conv2d_graph";
-    grappler_item_->graph = def;
     grappler_item_->fetch = {"y1", "y2", "batch_mean1", "batch_var1",
                              "control_dep"};
 
@@ -2199,6 +2263,17 @@ versions {
     EXPECT_EQ(expected.size(), test_elements.size());
   }
 
+  // Helper method for validating an unordered map.
+  template <typename T, typename U>
+  void ExpectUnorderedMapEq(const std::unordered_map<T, U>& expected,
+                            const std::unordered_map<T, U>& test_map) {
+    EXPECT_EQ(expected.size(), test_map.size());
+    for (const auto& key_val : expected) {
+      EXPECT_GT(test_map.count(key_val.first), 0);
+      EXPECT_EQ(test_map.at(key_val.first), key_val.second);
+    }
+  }
+
   // Helper method that checks name - port pairs.
   void ValidateMemoryUsageSnapshot(
       const std::vector<string>& expected_names, const int port_num_expected,
@@ -2235,6 +2310,8 @@ versions {
   // cluster_ and scheduler_ are initialized in the c'tor.
   std::unique_ptr<VirtualCluster> cluster_;
   std::unique_ptr<TestVirtualScheduler> scheduler_;
+  FirstReadyManager first_ready_manager_;
+  CompositeNodeManager composite_node_manager_;
 
   // grappler_item_ will be initialized differently for each test case.
   std::unique_ptr<GrapplerItem> grappler_item_;
@@ -2380,6 +2457,12 @@ TEST_F(VirtualSchedulerTest, MemoryUsage) {
             cpu_state.max_memory_usage);
   ValidateMemoryUsageSnapshot(expected_names, 0 /* port_num_expected */,
                               cpu_state.mem_usage_snapshot_at_peak);
+  ExpectUnorderedMapEq(
+      {std::make_pair("/job:localhost/replica:0/task:0/cpu:0", 64)},
+      scheduler_->GetPersistentMemoryUsage());
+  ExpectUnorderedMapEq(
+      {std::make_pair("/job:localhost/replica:0/task:0/cpu:0", 160000)},
+      scheduler_->GetPeakMemoryUsage());
 }
 
 TEST_F(VirtualSchedulerTest, UnnecessaryFeedNodes) {
@@ -2412,6 +2495,12 @@ TEST_F(VirtualSchedulerTest, ControlDependency) {
             cpu_state.max_memory_usage);
   ValidateMemoryUsageSnapshot(expected_names, -1 /* port_num_expected */,
                               cpu_state.mem_usage_snapshot_at_peak);
+  ExpectUnorderedMapEq(
+      {std::make_pair("/job:localhost/replica:0/task:0/cpu:0", 0)},
+      scheduler_->GetPersistentMemoryUsage());
+  ExpectUnorderedMapEq(
+      {std::make_pair("/job:localhost/replica:0/task:0/cpu:0", 28)},
+      scheduler_->GetPeakMemoryUsage());
 }
 
 TEST_F(VirtualSchedulerTest, ComplexDependency) {
@@ -2495,6 +2584,12 @@ TEST_F(VirtualSchedulerTest, Variable) {
   // Only x in peak memory usage snapshot.
   ValidateMemoryUsageSnapshot({"x"}, /*port_num_expected=*/0,
                               cpu_state.mem_usage_snapshot_at_peak);
+  ExpectUnorderedMapEq(
+      {std::make_pair("/job:localhost/replica:0/task:0/cpu:0", 4624)},
+      scheduler_->GetPersistentMemoryUsage());
+  ExpectUnorderedMapEq(
+      {std::make_pair("/job:localhost/replica:0/task:0/cpu:0", 12800)},
+      scheduler_->GetPeakMemoryUsage());
 }
 
 TEST_F(VirtualSchedulerTest, WhileLoop) {
@@ -2868,6 +2963,51 @@ TEST_F(VirtualSchedulerTest, GraphWihtOnlyRecv) {
 
   // Recv without Send will be treated as initially ready node.
   EXPECT_GT(ops_executed.count("Recv"), 0);
+}
+
+TEST_F(VirtualSchedulerTest, AddMergeSwitch) {
+  // Override scheduler_ with CompositeNodeManager.
+  scheduler_ = absl::make_unique<TestVirtualScheduler>(
+      /*use_static_shapes=*/true,
+      /*use_aggressive_shape_inference=*/true, &composite_node_manager_,
+      cluster_.get());
+  CreateGrapplerItemWithSwitchMergeInput();
+  InitScheduler();
+
+  // pred --+                      z --+
+  //        |                          |
+  //        V                          V
+  // x -> Switch --------> Merge ---> Add --> y
+  //        |                ^
+  //        |                |
+  //        +-----> Add -----+
+  //                 ^
+  //                 |
+  // b --------------+
+
+  // Run the scheduler. The current VirtualScheduler, w/o annotation, triggers
+  // both outputs of Switch; then Merge (as long as one input is ready, it's z
+  // is ready, if we just use num_inputs_ready counter, the final Add becomes
+  // ready. possible to skipt scheduling z. (Need to use CompositeNodeManager
+  // to test this case).
+  auto ops_executed = RunScheduler("");
+
+  EXPECT_GT(ops_executed.count("z"), 0);
+}
+
+TEST_F(VirtualSchedulerTest, AddFromOneTensor) {
+  CreateGrapplerItemWithAddFromOneTensor();
+  InitScheduler();
+
+  // x -+----> Add --> y
+  //    |       ^
+  //    |       |
+  //    +-------+
+
+  // Run the scheduler.
+  auto ops_executed = RunScheduler("");
+  EXPECT_GT(ops_executed.count("y"), 0);
+  EXPECT_GT(ops_executed.count("x"), 0);
 }
 
 }  // namespace

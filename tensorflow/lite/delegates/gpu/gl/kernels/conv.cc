@@ -27,6 +27,7 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/common/types.h"
 #include "tensorflow/lite/delegates/gpu/common/util.h"
 #include "tensorflow/lite/delegates/gpu/gl/node_shader.h"
+#include "tensorflow/lite/delegates/gpu/gl/variable.h"
 #include "tensorflow/lite/delegates/gpu/gl/workgroups/ideal_workgroup_picker.h"
 
 namespace tflite {
@@ -36,28 +37,48 @@ namespace {
 
 class Convolution : public NodeShader {
  public:
-  Status GenerateCode(const GenerationContext& ctx,
-                      GeneratedCode* generated_code) const final {
-    auto input = ctx.graph->FindInputs(ctx.node->id)[0];
-    auto attr = absl::any_cast<const Convolution2DAttributes&>(
-        ctx.node->operation.attributes);
+  absl::Status GenerateCode(const GenerationContext& ctx,
+                            GeneratedCode* generated_code) const final {
+    if (ctx.input_shapes.size() != 1) {
+      return absl::UnimplementedError(
+          "Convolution does not support more than 1 runtime tensor");
+    }
+    const auto& attr =
+        absl::any_cast<const Convolution2DAttributes&>(ctx.op_attr);
     auto weights = attr.weights.shape;
     const int offsets_count = weights.h * weights.w;
-    std::vector<int2> offsets;
-    for (int h = 0; h < weights.h; ++h) {
-      for (int w = 0; w < weights.w; ++w) {
-        offsets.emplace_back(w * attr.dilations.w - attr.padding.prepended.w,
-                             h * attr.dilations.h - attr.padding.prepended.h);
+    const bool offsets_count_too_large = offsets_count > kMaxConstArraySize;
+    std::vector<Variable> parameters;
+    if (offsets_count_too_large) {
+      parameters = {
+          {"input_data_0_h", static_cast<int>(ctx.input_shapes[0][1])},
+          {"input_data_0_w", static_cast<int>(ctx.input_shapes[0][2])},
+          {"padding_w", attr.padding.prepended.w},
+          {"padding_h", attr.padding.prepended.h},
+          {"dilation_w", attr.dilations.w},
+          {"dilation_h", attr.dilations.h},
+          {"kernel_w", weights.w},
+          {"kernel_h", weights.h},
+          {"src_depth", DivideRoundUp(weights.i, 4)},
+          {"stride", int2(attr.strides.w, attr.strides.h)},
+      };
+    } else {
+      std::vector<int2> offsets;
+      for (int h = 0; h < weights.h; ++h) {
+        for (int w = 0; w < weights.w; ++w) {
+          offsets.emplace_back(w * attr.dilations.w - attr.padding.prepended.w,
+                               h * attr.dilations.h - attr.padding.prepended.h);
+        }
       }
+      parameters = {
+          {"input_data_0_h", static_cast<int>(ctx.input_shapes[0][1])},
+          {"input_data_0_w", static_cast<int>(ctx.input_shapes[0][2])},
+          {"offsets_count", offsets_count},
+          {"offsets", offsets},
+          {"src_depth", DivideRoundUp(weights.i, 4)},
+          {"stride", int2(attr.strides.w, attr.strides.h)},
+      };
     }
-    std::vector<UniformParameter> parameters = {
-        {"input_data_0_h", input->tensor.shape.h},
-        {"input_data_0_w", input->tensor.shape.w},
-        {"offsets_count", offsets_count},
-        {"offsets", offsets},
-        {"src_depth", IntegralDivideRoundUp(weights.i, 4)},
-        {"stride", int2(attr.strides.w, attr.strides.h)},
-    };
 
     // at least one padding is not empty
     bool non_empty_padding =
@@ -68,9 +89,18 @@ class Convolution : public NodeShader {
         {"weights", MakeReadonlyObject(Get3DSizeForPHWO4I4(attr.weights.shape),
                                        ConvertToPHWO4I4(attr.weights))}};
 
-    std::string source = R"(
-      for (int i = 0; i < $offsets_count$; ++i) {
-        ivec2 coord = gid.xy * $stride$ + $offsets[i]$;)";
+    std::string source;
+    if (offsets_count_too_large) {
+      source = R"(
+      int i = 0;
+      for (int ky = 0; ky < $kernel_h$; ky++) {
+        for (int kx = 0; kx < $kernel_w$; kx++, i++) {
+          ivec2 coord = gid.xy * $stride$ + ivec2(kx * $dilation_w$ - $padding_w$, ky * $dilation_h$ - $padding_h$);)";
+    } else {
+      source = R"(
+        for (int i = 0; i < $offsets_count$; ++i) {
+          ivec2 coord = gid.xy * $stride$ + $offsets[i]$;)";
+    }
     if (non_empty_padding) {
       source += R"(
         if (coord.x < 0 || coord.y < 0 || coord.x >= $input_data_0_w$ || coord.y >= $input_data_0_h$) {
@@ -78,44 +108,41 @@ class Convolution : public NodeShader {
         })";
     }
     source += R"(
-        for (int l = 0; l < $src_depth$; ++l) {
-          highp vec4 input_ = $input_data_0[coord.x, coord.y, l]$;
-          value_0.x += dot(input_, $weights[l * 4 + 0, i, gid.z]$);
-          value_0.y += dot(input_, $weights[l * 4 + 1, i, gid.z]$);
-          value_0.z += dot(input_, $weights[l * 4 + 2, i, gid.z]$);
-          value_0.w += dot(input_, $weights[l * 4 + 3, i, gid.z]$);
+          for (int l = 0; l < $src_depth$; ++l) {
+            vec4 input_ = $input_data_0[coord.x, coord.y, l]$;
+            value_0.x += dot(input_, $weights[l * 4 + 0, i, gid.z]$);
+            value_0.y += dot(input_, $weights[l * 4 + 1, i, gid.z]$);
+            value_0.z += dot(input_, $weights[l * 4 + 2, i, gid.z]$);
+            value_0.w += dot(input_, $weights[l * 4 + 3, i, gid.z]$);
+          }
         }
+)";
+    if (offsets_count_too_large) {
+      source += R"(
       }
-    )";
+)";
+    }
     if (!attr.bias.data.empty()) {
       source += "value_0 += $bias[gid.z]$;\n";
       objects.push_back({"bias", MakeReadonlyObject(attr.bias.data)});
     }
 
-    // This is a hotfix for special convolution, which worked 10ms on
-    // textures16. With this fix it works 4ms.
-    // TODO(eignasheva): fix this problem in the proper way
-    uint3 workgroup = uint3(0, 0, 0);
-    if (weights.h == 7 && weights.w == 7 && attr.strides.h == 4 &&
-        attr.strides.w == 4) {
-      workgroup = uint3(8, 8, 8);
-    }
-
     *generated_code = {
         /*parameters=*/std::move(parameters),
         /*objects=*/std::move(objects),
+        /*shared_variables=*/{},
         /*workload=*/uint3(),
         /*workgroup=*/
         GetIdealWorkgroupIfPossible(
             ctx.gpu_info->gpu_model, OperationType::CONVOLUTION_2D,
-            HW(weights.h, weights.w), attr.strides, workgroup,
-            OHWI(weights.o, input->tensor.shape.h, input->tensor.shape.w,
-                 input->tensor.shape.c)),
+            HW(weights.h, weights.w), attr.strides, uint3(0, 0, 0),
+            OHWI(weights.o, ctx.input_shapes[0][1], ctx.input_shapes[0][2],
+                 ctx.input_shapes[0][3])),
         /*source_code=*/std::move(source),
         /*input=*/IOStructure::ONLY_DEFINITIONS,
         /*output=*/IOStructure::AUTO,
     };
-    return OkStatus();
+    return absl::OkStatus();
   }
 };
 
@@ -136,37 +163,40 @@ int SelectMultiplier(int32_t input_width,
 
 class Convolution1x1 : public NodeShader {
  public:
-  Status GenerateCode(const GenerationContext& ctx,
-                      GeneratedCode* generated_code) const final {
-    auto input = ctx.graph->FindInputs(ctx.node->id)[0];
-    auto output = ctx.graph->FindOutputs(ctx.node->id)[0];
-    auto attr = absl::any_cast<const Convolution2DAttributes&>(
-        ctx.node->operation.attributes);
+  absl::Status GenerateCode(const GenerationContext& ctx,
+                            GeneratedCode* generated_code) const final {
+    if (ctx.input_shapes.size() != 1) {
+      return absl::UnimplementedError(
+          "Convolution does not support more than 1 runtime tensor");
+    }
+    const auto& attr =
+        absl::any_cast<const Convolution2DAttributes&>(ctx.op_attr);
     if (attr.weights.shape.h != 1 || attr.weights.shape.w != 1) {
-      return UnimplementedError("Height and width should be 1.");
+      return absl::UnimplementedError("Height and width should be 1.");
     }
     if (attr.dilations.h != 1 || attr.dilations.w != 1) {
-      return UnimplementedError("Dilations are not supported.");
+      return absl::UnimplementedError("Dilations are not supported.");
     }
     if (attr.strides.h != 1 || attr.strides.w != 1) {
-      return UnimplementedError("Strides are not supported.");
+      return absl::UnimplementedError("Strides are not supported.");
     }
     if (attr.padding.appended.h != 0 || attr.padding.appended.w != 0 ||
         attr.padding.prepended.h != 0 || attr.padding.prepended.w != 0) {
-      return UnimplementedError("Padding is not supported.");
+      return absl::UnimplementedError("Padding is not supported.");
     }
 
-    int multiplier = SelectMultiplier(input->tensor.shape.w, ctx);
+    int multiplier = SelectMultiplier(ctx.input_shapes[0][2], ctx);
 
-    std::vector<UniformParameter> parameters = {
-        {"src_depth", IntegralDivideRoundUp(input->tensor.shape.c, 4)},
+    std::vector<Variable> parameters = {
+        {"src_depth",
+         DivideRoundUp(static_cast<int>(ctx.input_shapes[0][3]), 4)},
     };
 
     std::vector<std::pair<std::string, Object>> objects = {
-        {"weights", MakeReadonlyObject(
-                        uint3(4, IntegralDivideRoundUp(attr.weights.shape.i, 4),
-                              IntegralDivideRoundUp(attr.weights.shape.o, 4)),
-                        ConvertToPHWO4I4(attr.weights))}};
+        {"weights",
+         MakeReadonlyObject(uint3(4, DivideRoundUp(attr.weights.shape.i, 4),
+                                  DivideRoundUp(attr.weights.shape.o, 4)),
+                            ConvertToPHWO4I4(attr.weights))}};
     std::string source;
     for (int i = 0; i < multiplier; i++) {
       absl::StrAppend(&source, "highp vec4 result", i, " = vec4(0);\n");
@@ -202,7 +232,7 @@ class Convolution1x1 : public NodeShader {
       absl::StrAppend(&source, "value_0 = result0;\n");
     }
 
-    auto dst_depth = IntegralDivideRoundUp(output->tensor.shape.c, 4);
+    auto dst_depth = DivideRoundUp(ctx.output_shapes[0][3], 4);
     uint3 workgroup = uint3(16, 16, 1);
     if (ctx.gpu_info->type == GpuType::ADRENO) {
       if (dst_depth >= 2) {
@@ -240,22 +270,23 @@ class Convolution1x1 : public NodeShader {
     *generated_code = {
         /*parameters=*/std::move(parameters),
         /*objects=*/std::move(objects),
+        /*shared_variables=*/{},
         /*workload=*/
-        uint3(output->tensor.shape.w / multiplier, output->tensor.shape.h,
-              IntegralDivideRoundUp(output->tensor.shape.c, 4)),
+        uint3(ctx.output_shapes[0][2] / multiplier, ctx.output_shapes[0][1],
+              DivideRoundUp(ctx.output_shapes[0][3], 4)),
         /*workgroup=*/
         GetIdealWorkgroupIfPossible(
             ctx.gpu_info->gpu_model, OperationType::CONVOLUTION_2D,
             HW(attr.weights.shape.h, attr.weights.shape.w), attr.strides,
             workgroup,
-            OHWI(attr.weights.shape.o, input->tensor.shape.h,
-                 input->tensor.shape.w, input->tensor.shape.c)),
+            OHWI(attr.weights.shape.o, ctx.input_shapes[0][1],
+                 ctx.input_shapes[0][2], ctx.input_shapes[0][3])),
         /*source_code=*/std::move(source),
         /*input=*/IOStructure::ONLY_DEFINITIONS,
         /*output=*/multiplier == 1 ? IOStructure::AUTO
                                    : IOStructure::ONLY_DEFINITIONS,
     };
-    return OkStatus();
+    return absl::OkStatus();
   }
 };
 

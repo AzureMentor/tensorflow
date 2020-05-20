@@ -34,12 +34,11 @@ from tensorflow.python.eager import backprop
 from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
 from tensorflow.python.eager import test
-from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
-from tensorflow.python.layers import core
+from tensorflow.python.keras.layers import core
 from tensorflow.python.lib.io import tf_record
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gradients_impl
@@ -51,6 +50,7 @@ from tensorflow.python.platform import gfile
 from tensorflow.python.training import optimizer
 from tensorflow.python.training import training_util
 from tensorflow.python.util import nest
+
 
 class _TestException(Exception):
   pass
@@ -119,7 +119,7 @@ class DistributionTestBase(test.TestCase):
       l = core.Dense(1, use_bias=False)
 
       def loss(x):
-        y = array_ops.reshape(l(x), []) - constant_op.constant(1.)
+        y = array_ops.reshape(l(x), []) - array_ops.identity(1.)
         return y * y
       # TODO(isaprykin): Extract implicit_grad+get_filtered_grad_fn into a
       # common `implicit_grad` function and put it in DistributionStrategy.
@@ -129,7 +129,7 @@ class DistributionTestBase(test.TestCase):
       def update(v, g):
         return v.assign_sub(0.2 * g)
 
-      one = constant_op.constant([[1.]])
+      one = array_ops.identity([[1.]])
 
       def step():
         """Perform one optimization step."""
@@ -176,7 +176,7 @@ class DistributionTestBase(test.TestCase):
       l = core.Dense(1, use_bias=False)
 
       def loss(x):
-        y = array_ops.reshape(l(x), []) - constant_op.constant(1.)
+        y = array_ops.reshape(l(x), []) - array_ops.identity(1.)
         return y * y
 
       grad_fn = backprop.implicit_grad(loss)
@@ -184,7 +184,7 @@ class DistributionTestBase(test.TestCase):
       def update(v, g):
         return v.assign_sub(learning_rate * g)
 
-      one = constant_op.constant([[1.]])
+      one = array_ops.identity([[1.]])
 
       def step():
         """Perform one optimization step."""
@@ -306,6 +306,35 @@ class DistributionTestBase(test.TestCase):
 
     return _input_fn
 
+  def _test_input_fn_iterable(
+      self, strategy, input_fn, expected_values, ignore_order=False):
+    assert_same = self.assertCountEqual if ignore_order else self.assertEqual
+
+    iterable = strategy.experimental_distribute_datasets_from_function(input_fn)
+    if context.executing_eagerly():
+      iterator = iter(iterable)
+
+      for expected_value in expected_values:
+        computed_value = self.evaluate(
+            list(strategy.experimental_local_results(next(iterator))))
+        assert_same(expected_value, computed_value)
+
+      with self.assertRaises(StopIteration):
+        self.evaluate(strategy.experimental_local_results(next(iterator)))
+
+      # After re-initializing the iterator, should be able to iterate again.
+      iterator = iter(iterable)
+
+      for expected_value in expected_values:
+        computed_value = self.evaluate(
+            list(strategy.experimental_local_results(next(iterator))))
+        assert_same(expected_value, computed_value)
+    else:
+      iterator = dataset_ops.make_initializable_iterator(iterable)
+      self._test_input_fn_iterator(iterator, strategy.extended.worker_devices,
+                                   expected_values, test_reinitialize=True,
+                                   ignore_order=ignore_order)
+
   def _test_input_fn_iterator(self,
                               iterator,
                               devices,
@@ -314,7 +343,7 @@ class DistributionTestBase(test.TestCase):
                               test_reinitialize=True,
                               ignore_order=False):
     evaluate = lambda x: sess.run(x) if sess else self.evaluate(x)
-    evaluate(iterator.initialize())
+    evaluate(iterator.initializer)
 
     for expected_value in expected_values:
       next_element = iterator.get_next()
@@ -332,7 +361,7 @@ class DistributionTestBase(test.TestCase):
 
     # After re-initializing the iterator, should be able to iterate again.
     if test_reinitialize:
-      evaluate(iterator.initialize())
+      evaluate(iterator.initializer)
 
       for expected_value in expected_values:
         next_element = iterator.get_next()
@@ -366,16 +395,17 @@ class DistributionTestBase(test.TestCase):
       global_step_values = self.evaluate(global_step_tensors)
       self.assertEqual((1,) * len(global_step_tensors), global_step_values)
 
-  def _test_numpy_dataset(self, strategy):
-    with strategy.scope(), self.cached_session() as sess:
+  def _test_numpy_dataset(self, strategy, session=None):
+    cached_session = session or self.cached_session()
+    with strategy.scope(), cached_session as sess:
       x = np.asarray([[1, 2], [6, 12], [2, 4], [5, 10], [3, 6], [4, 8]])
       y = np.asarray([5, 4, 3, 2, 1, 0])
       batch_size = 6
       if not strategy.extended._global_batch_size:  # pylint: disable=protected-access
         batch_size = batch_size // strategy.num_replicas_in_sync
 
-      ds = strategy.extended.experimental_make_numpy_dataset((x, y),
-                                                             session=sess)
+      ds = strategy.extended.experimental_make_numpy_dataset(
+          (x, y), session=sess or self.cached_session())
       ds = ds.repeat(2)  # 2 epochs
       # We need to use the drop_remainder argument to get a known static
       # input shape which is required for TPUs.
@@ -383,7 +413,7 @@ class DistributionTestBase(test.TestCase):
       ds = ds.batch(batch_size, drop_remainder=drop_remainder)
       i = strategy.make_dataset_iterator(ds)
 
-      self.evaluate(i.initialize())
+      self.evaluate(i.initializer)
 
       def run_and_concatenate(strategy, i):
         x, y = strategy.experimental_run(lambda z: z, i)
@@ -400,21 +430,37 @@ class DistributionTestBase(test.TestCase):
       with self.assertRaises(errors.OutOfRangeError):
         run_and_concatenate(strategy, i)
 
+  def _test_trainable_variable(self, strategy):
+    for cls in [variables.VariableV1, variables.Variable]:
+      with strategy.scope():
+        v1 = cls(1.0)
+        self.assertEqual(True, v1.trainable)
+
+        v2 = cls(1.0, synchronization=variables.VariableSynchronization.ON_READ)
+        self.assertEqual(False, v2.trainable)
+
+        v3 = cls(1.0, synchronization=variables.VariableSynchronization.ON_READ,
+                 trainable=True)
+        self.assertEqual(True, v3.trainable)
+
+        v4 = cls(1.0, synchronization=variables.VariableSynchronization.ON_READ,
+                 trainable=False)
+        self.assertEqual(False, v4.trainable)
+
 
 class OneDeviceDistributionTestBase(test.TestCase):
   """Some tests that should work with any one-device DistributionStrategy."""
 
   def _test_run(self, strategy):
-    out1 = strategy.experimental_run_v2(lambda: constant_op.constant(4.))
+    out1 = strategy.run(lambda: array_ops.identity(4.))
     self.assertAllEqual([4.], self.evaluate(strategy.unwrap(out1)))
 
-    out2 = strategy.experimental_run_v2(
-        lambda x: {"a": x * 2, "b": x * x}, args=(out1,))
+    out2 = strategy.run(lambda x: {"a": x * 2, "b": x * x}, args=(out1,))
     out2_vals = self.evaluate(nest.map_structure(strategy.unwrap, out2))
     self.assertAllEqual([8.], out2_vals["a"])
     self.assertAllEqual([16.], out2_vals["b"])
 
-    out3 = strategy.experimental_run_v2(lambda b, a: a + 2 * b + 2, kwargs=out2)
+    out3 = strategy.run(lambda b, a: a + 2 * b + 2, kwargs=out2)
     self.assertAllEqual([42.], self.evaluate(strategy.unwrap(out3)))
 
   def _test_all_reduce_sum(self, strategy):
@@ -459,7 +505,7 @@ class OneDeviceDistributionTestBase(test.TestCase):
       self.skipTest("`tf.gradients` is not supported with eager execution.")
 
     def step(c):
-      x = constant_op.constant(42.)
+      x = array_ops.identity(42.)
       y = comm_fn(x) * c
       return gradients_impl.gradients(y, [x])[0]
 
@@ -477,7 +523,7 @@ class OneDeviceDistributionTestBase(test.TestCase):
                                            expected_grads):
 
     def step(c):
-      x = constant_op.constant(42.)
+      x = array_ops.identity(42.)
       with backprop.GradientTape() as tape:
         tape.watch(x)
         y = comm_fn(x) * c
@@ -527,17 +573,16 @@ class TwoDeviceDistributionTestBase(test.TestCase):
   """Some tests that should work with any two-device DistributionStrategy."""
 
   def _test_run(self, strategy):
-    out1 = strategy.experimental_run_v2(
+    out1 = strategy.run(
         lambda: ds_context.get_replica_context().replica_id_in_sync_group + 1)
     self.assertAllEqual([1, 2], self.evaluate(strategy.unwrap(out1)))
 
-    out2 = strategy.experimental_run_v2(
-        lambda x: {"a": x * 2, "b": x * x}, args=(out1,))
+    out2 = strategy.run(lambda x: {"a": x * 2, "b": x * x}, args=(out1,))
     out2_vals = self.evaluate(nest.map_structure(strategy.unwrap, out2))
     self.assertAllEqual([2, 4], out2_vals["a"])
     self.assertAllEqual([1, 4], out2_vals["b"])
 
-    out3 = strategy.experimental_run_v2(lambda b, a: a + 2 * b + 2, kwargs=out2)
+    out3 = strategy.run(lambda b, a: a + 2 * b + 2, kwargs=out2)
     self.assertAllEqual([6, 14], self.evaluate(strategy.unwrap(out3)))
 
   def _test_all_reduce_sum(self, strategy):
@@ -588,7 +633,7 @@ class TwoDeviceDistributionTestBase(test.TestCase):
       self.skipTest("`tf.gradients` is not supported with eager execution.")
 
     def step(c):
-      x = constant_op.constant(42.)
+      x = array_ops.identity(42.)
       y = comm_fn(x) * c
       return gradients_impl.gradients(y, [x])[0]
 
@@ -606,7 +651,7 @@ class TwoDeviceDistributionTestBase(test.TestCase):
                                            expected_grads):
 
     def step(c):
-      x = constant_op.constant(42.)
+      x = array_ops.identity(42.)
       with backprop.GradientTape() as tape:
         tape.watch(x)
         y = comm_fn(x) * c
@@ -621,6 +666,81 @@ class TwoDeviceDistributionTestBase(test.TestCase):
         self.evaluate(
             strategy.experimental_local_results(
                 strategy.experimental_run(step, inputs))))
+
+
+class RemoteSingleWorkerMirroredStrategyBase(DistributionTestBase):
+  """Tests for a Remote single worker."""
+
+  def _get_num_gpus(self):
+    pass
+
+  def _testNumReplicasInSync(self, distribution):
+    self.assertEqual(self._get_num_gpus(), distribution.num_replicas_in_sync)
+
+  def _testMinimizeLoss(self, distribution):
+    if context.executing_eagerly():
+      self._test_minimize_loss_eager(distribution)
+    else:
+      self._test_minimize_loss_graph(distribution, learning_rate=0.05)
+
+  def _testDeviceScope(self, distribution):
+    with distribution.scope():
+      a = array_ops.identity(1.)
+      with ops.device("/cpu:0"):
+        b = array_ops.identity(1.)
+      if context.executing_eagerly():
+        device = "/job:worker/replica:0/task:0/device:CPU:0"
+      else:
+        device = "/job:worker/replica:0/task:0"
+      self.assertEqual(a.device, device)
+      self.assertEqual(b.device, "/job:worker/replica:0/task:0/device:CPU:0")
+
+  def _testMakeInputFnIteratorWithDataset(self, distribution):
+    dataset_fn = lambda: dataset_ops.Dataset.range(100)
+    num_gpus = self._get_num_gpus()
+    num_workers = 1
+
+    expected_values = [[i+j for j in range(num_gpus)] * num_workers
+                       for i in range(0, 100, num_gpus)]
+
+    # Dummy cached_session is used in Eager
+    with self.cached_session() as sess:
+      # `expected_input_pipeline_id` is None because the input_fn will be called
+      # multiple times, each with a different input_pipeline_id.
+      input_fn = self._input_fn_to_test_input_context(
+          dataset_fn,
+          expected_num_replicas_in_sync=num_workers*num_gpus,
+          expected_num_input_pipelines=num_workers,
+          expected_input_pipeline_id=None)
+      iterator = distribution.make_input_fn_iterator(input_fn)
+      self._test_input_fn_iterator(
+          iterator, distribution.extended.worker_devices, expected_values, sess)
+
+  def _testMakeInputFnIteratorWithCallable(self, distribution):
+    def fn():
+      dataset = dataset_ops.Dataset.range(100)
+      it = dataset_ops.make_one_shot_iterator(dataset)
+      return it.get_next
+    num_gpus = self._get_num_gpus()
+    num_workers = 1
+
+    expected_values = []
+    for i in range(0, 100, num_gpus):
+      expected_values.append([i+j for j in range(num_gpus)] * num_workers)
+
+    # Dummy cached_session is used in Eager
+    with self.cached_session() as sess:
+      # `expected_input_pipeline_id` is None because the input_fn will be called
+      # multiple times, each with a different input_pipeline_id.
+      input_fn = self._input_fn_to_test_input_context(
+          fn,
+          expected_num_replicas_in_sync=num_workers*num_gpus,
+          expected_num_input_pipelines=num_workers,
+          expected_input_pipeline_id=None)
+      iterator = distribution.make_input_fn_iterator(input_fn)
+      self._test_input_fn_iterator(
+          iterator, distribution.extended.worker_devices, expected_values, sess,
+          test_reinitialize=False, ignore_order=True)
 
 
 def _all_sum(value):

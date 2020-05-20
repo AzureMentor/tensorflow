@@ -26,6 +26,7 @@ from tensorflow.python.kernel_tests.random import util as \
 random_test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import stateless_random_ops as stateless
+from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
 
 
@@ -33,14 +34,14 @@ class StatelessRandomOpsTest(xla_test.XLATestCase):
   """Test cases for stateless random-number generator operators."""
 
   def _random_types(self, include_int=False):
-    allowed_types = {dtypes.float32, dtypes.float64, dtypes.bfloat16}
+    allowed_types = {dtypes.float64, dtypes.float32, dtypes.bfloat16}
     if include_int:
       allowed_types.update({dtypes.int32, dtypes.int64})
     return self.all_tf_types & allowed_types
 
   def testDeterminism(self):
     # Stateless values should be equal iff the seeds are equal (roughly)
-    with self.cached_session(), self.test_scope():
+    with self.session(), self.test_scope():
       seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
       seeds = [(x, y) for x in range(5) for y in range(5)] * 3  # pylint: disable=g-complex-comprehension
       for stateless_op in [
@@ -62,7 +63,7 @@ class StatelessRandomOpsTest(xla_test.XLATestCase):
                 self.assertEqual(s0 == s1, np.all(v0 == v1))
 
   def testRandomUniformIsInRange(self):
-    with self.cached_session() as sess, self.test_scope():
+    with self.session() as sess, self.test_scope():
       for dtype in self._random_types(include_int=True):
         maxval = 1
         if dtype.is_integer:
@@ -70,13 +71,13 @@ class StatelessRandomOpsTest(xla_test.XLATestCase):
         seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
         x = stateless.stateless_random_uniform(
             shape=[1000], seed=seed_t, maxval=maxval, dtype=dtype)
-        y = sess.run(x, {seed_t: [0x12345678, 0xabcdef12]})
+        y = sess.run(x, {seed_t: [0x12345678, 0xabcdef1]})
         self.assertTrue(np.all(y >= 0))
         self.assertTrue(np.all(y < maxval))
 
   def testDistributionOfStatelessRandomUniform(self):
     """Use Pearson's Chi-squared test to test for uniformity."""
-    with self.cached_session() as sess, self.test_scope():
+    with self.session() as sess, self.test_scope():
       for dtype in self._random_types(include_int=True):
         seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
         n = 1000
@@ -86,9 +87,9 @@ class StatelessRandomOpsTest(xla_test.XLATestCase):
         x = stateless.stateless_random_uniform(
             shape=[n], seed=seed_t, maxval=maxval, dtype=dtype)
         y = sess.run(x, {seed_t: [565656, 121212]})
-        if maxval > 1:
-          # Normalize y to range [0, 1).
-          y = y.astype(float) / maxval
+        # Convert y to float and normalize its value to range [0, 1) when
+        # maxval != 1.
+        y = y.astype(float) / maxval
         # Tests that the values are distributed amongst 10 bins with equal
         # probability. 16.92 is the Chi^2 value for 9 degrees of freedom with
         # p=0.05. This test is probabilistic and would be flaky if the random
@@ -96,17 +97,17 @@ class StatelessRandomOpsTest(xla_test.XLATestCase):
         self.assertLess(random_test_util.chi_squared(y, 10), 16.92)
 
   def testRandomNormalIsFinite(self):
-    with self.cached_session() as sess, self.test_scope():
+    with self.session() as sess, self.test_scope():
       for dtype in self._random_types():
         seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
         x = stateless.stateless_random_normal(
             shape=[10000], seed=seed_t, dtype=dtype)
-        y = sess.run(x, {seed_t: [0x12345678, 0xabcdef12]})
+        y = sess.run(x, {seed_t: [0x12345678, 0xabcdef1]})
         self.assertTrue(np.all(np.isfinite(y)))
 
   def testDistributionOfStatelessRandomNormal(self):
     """Use Anderson-Darling test to test distribution appears normal."""
-    with self.cached_session() as sess, self.test_scope():
+    with self.session() as sess, self.test_scope():
       for dtype in self._random_types():
         seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
         n = 1000
@@ -121,14 +122,48 @@ class StatelessRandomOpsTest(xla_test.XLATestCase):
 
   def testTruncatedNormal(self):
     for dtype in self._random_types():
-      with self.cached_session() as sess, self.test_scope():
+      with self.session() as sess, self.test_scope():
         seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
         n = 10000000
         x = stateless.stateless_truncated_normal(
             shape=[n], seed=seed_t, dtype=dtype)
-        y = sess.run(x, {seed_t: [0x12345678, 0xabcdef12]})
+        y = sess.run(x, {seed_t: [0x12345678, 0xabcdef1]})
         random_test_util.test_truncated_normal(
-            self.assertEqual, self.assertAllClose, dtype, n, y)
+            self.assertEqual, self.assertAllClose, n, y,
+            variance_rtol=6e-3 if dtype == dtypes.bfloat16 else 1e-3)
+
+
+class StatelessRandomOpsBenchmark(test.Benchmark):
+  """Microbenchmarks for the stateless random ops."""
+
+  def _benchmarkUniform(self, name, dtype, use_xla_jit):
+
+    def BuilderFn():
+      shape = (10, 1000, 1000)
+      seed_var = variables.Variable((312, 456),
+                                    dtype=dtypes.int32,
+                                    name='input')
+      random_t = stateless.stateless_random_uniform(
+          shape, seed=seed_var, dtype=dtype)
+      return '%s.shape%s' % (name, shape), [random_t]
+
+    xla_test.Benchmark(self, BuilderFn, use_xla_jit=use_xla_jit, device='cpu')
+
+  def benchmarkUniformF32(self):
+    self._benchmarkUniform(
+        'uniform_f32', dtype=dtypes.float32, use_xla_jit=False)
+
+  def benchmarkUniformF64(self):
+    self._benchmarkUniform(
+        'uniform_f64', dtype=dtypes.float64, use_xla_jit=False)
+
+  def benchmarkUniformF32XLA(self):
+    self._benchmarkUniform(
+        'uniform_f32', dtype=dtypes.float32, use_xla_jit=True)
+
+  def benchmarkUniformF64XLA(self):
+    self._benchmarkUniform(
+        'uniform_f64', dtype=dtypes.float64, use_xla_jit=True)
 
 
 if __name__ == '__main__':

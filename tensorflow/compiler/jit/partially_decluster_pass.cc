@@ -27,6 +27,7 @@ limitations under the License.
 #include "tensorflow/core/framework/memory_types.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/graph/graph_node_util.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/public/version.h"
 
@@ -51,6 +52,15 @@ Status FindNodesToDecluster(const Graph& graph,
       continue;
     }
 
+    // Assume the benefit of not outputting a larger tensor outweighs the
+    // benefit of this check.
+    // TODO(tpopp): Only apply this if the value being consumed is not output
+    // from the cluster to another consumer.
+    // TODO(tpopp): See if XlaRun can be modified to avoid this issue
+    // completely.
+    if (IsShapeConsumerOp(*n)) {
+      continue;
+    }
     // We assume the only XLA-auto-clusterable operations with side effects are
     // resource variable updates.  We can't execute these twice.
     if (HasResourceInputOrOutput(*n)) {
@@ -286,7 +296,7 @@ Status PartiallyDeclusterGraph(Graph* graph,
   std::vector<bool> compile_time_const_nodes(graph->num_node_ids());
   OptimizerOptions opts;
   auto pflr = absl::make_unique<ProcessFunctionLibraryRuntime>(
-      nullptr, env, TF_GRAPH_DEF_VERSION, flib_def, opts);
+      nullptr, env, /*config=*/nullptr, TF_GRAPH_DEF_VERSION, flib_def, opts);
   FunctionLibraryRuntime* lib_runtime =
       pflr->GetFLR(ProcessFunctionLibraryRuntime::kDefaultFLRDevice);
   TF_RETURN_IF_ERROR(BackwardsConstAnalysis(*graph, nullptr,
@@ -344,12 +354,6 @@ Status PartiallyDeclusterGraph(Graph* graph,
 }  // namespace reduce_recompilation
 
 namespace decluster_root_shape_consumers {
-// Returns true if `node` an operator that consumes only the shape of its input,
-// not the data itself.
-bool IsShapeConsumerOp(const Node& node) {
-  return node.type_string() == "Shape" || node.type_string() == "Rank" ||
-         node.type_string() == "Size";
-}
 
 Status PartiallyDeclusterGraph(Graph* graph) {
   std::vector<Node*> reverse_post_order;

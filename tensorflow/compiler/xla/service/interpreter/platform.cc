@@ -30,7 +30,7 @@ limitations under the License.
 namespace stream_executor {
 namespace interpreter {
 
-XlaInterpreterPlatform::XlaInterpreterPlatform(const string& name,
+XlaInterpreterPlatform::XlaInterpreterPlatform(const std::string& name,
                                                const Platform::Id& id)
     : name_(name), id_(id) {}
 
@@ -40,7 +40,7 @@ Platform::Id XlaInterpreterPlatform::id() const { return id_; }
 
 int XlaInterpreterPlatform::VisibleDeviceCount() const { return 1; }
 
-const string& XlaInterpreterPlatform::Name() const { return name_; }
+const std::string& XlaInterpreterPlatform::Name() const { return name_; }
 
 port::StatusOr<std::unique_ptr<DeviceDescription>>
 XlaInterpreterPlatform::DescriptionForDevice(int ordinal) const {
@@ -76,8 +76,9 @@ port::StatusOr<std::unique_ptr<StreamExecutor>>
 XlaInterpreterPlatform::GetUncachedExecutor(
     const StreamExecutorConfig& config) {
   auto executor = absl::make_unique<StreamExecutor>(
-      this, absl::make_unique<XlaInterpreterExecutor>(config.plugin_config));
-  auto init_status = executor->Init(config.ordinal, config.device_options);
+      this, absl::make_unique<XlaInterpreterExecutor>(config.plugin_config),
+      config.ordinal);
+  auto init_status = executor->Init(config.device_options);
   if (!init_status.ok()) {
     return port::Status{
         port::error::INTERNAL,

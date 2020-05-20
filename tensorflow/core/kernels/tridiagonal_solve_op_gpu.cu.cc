@@ -22,12 +22,14 @@ limitations under the License.
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/cuda_solvers.h"
 #include "tensorflow/core/kernels/cuda_sparse.h"
 #include "tensorflow/core/kernels/linalg_ops_common.h"
 #include "tensorflow/core/kernels/transpose_functor.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/util/gpu_device_functions.h"
+#include "tensorflow/core/util/gpu_kernel_helper.h"
 #include "tensorflow/core/util/gpu_launch_config.h"
 
 namespace tensorflow {
@@ -38,15 +40,18 @@ static const char kNotInvertibleScalarMsg[] =
     "The matrix is not invertible: it is a scalar with value zero.";
 
 template <typename Scalar>
-__global__ void SolveForSizeOneOrTwoKernel(const int m, const Scalar* diags,
-                                           const Scalar* rhs, const int num_rhs,
-                                           Scalar* x, bool* not_invertible) {
+__global__ void SolveForSizeOneOrTwoKernel(const int m,
+                                           const Scalar* __restrict__ diags,
+                                           const Scalar* __restrict__ rhs,
+                                           const int num_rhs,
+                                           Scalar* __restrict__ x,
+                                           bool* __restrict__ not_invertible) {
   if (m == 1) {
     if (diags[1] == Scalar(0)) {
       *not_invertible = true;
       return;
     }
-    for (int i : CudaGridRangeX(num_rhs)) {
+    for (int i : GpuGridRangeX(num_rhs)) {
       x[i] = rhs[i] / diags[1];
     }
   } else {
@@ -55,7 +60,7 @@ __global__ void SolveForSizeOneOrTwoKernel(const int m, const Scalar* diags,
       *not_invertible = true;
       return;
     }
-    for (int i : CudaGridRangeX(num_rhs)) {
+    for (int i : GpuGridRangeX(num_rhs)) {
       x[i] = (diags[3] * rhs[i] - diags[0] * rhs[i + num_rhs]) / det;
       x[i + num_rhs] = (diags[2] * rhs[i + num_rhs] - diags[5] * rhs[i]) / det;
     }
@@ -130,11 +135,11 @@ class TridiagonalSolveOpGpuLinalg : public LinearAlgebraOp<Scalar> {
   void ComputeMatrix(OpKernelContext* context, const ConstMatrixMaps& inputs,
                      MatrixMaps* outputs) final {
     const auto diagonals = inputs[0];
-    // Subdiagonal elements, first is ignored.
+    // Superdiagonal elements, first is ignored.
     const auto& superdiag = diagonals.row(0);
     // Diagonal elements.
     const auto& diag = diagonals.row(1);
-    // Superdiagonal elements, last is ignored.
+    // Subdiagonal elements, last is ignored.
     const auto& subdiag = diagonals.row(2);
     // Right-hand sides.
     const auto& rhs = inputs[1];
@@ -151,7 +156,7 @@ class TridiagonalSolveOpGpuLinalg : public LinearAlgebraOp<Scalar> {
                            k);
       return;
     }
-    std::unique_ptr<CudaSparse> cusparse_solver(new CudaSparse(context));
+    std::unique_ptr<GpuSparse> cusparse_solver(new GpuSparse(context));
     OP_REQUIRES_OK(context, cusparse_solver->Initialize());
     if (k == 1) {
       // rhs is copied into x, then gtsv replaces x with solution.
@@ -191,27 +196,40 @@ class TridiagonalSolveOpGpuLinalg : public LinearAlgebraOp<Scalar> {
   }
 
   void SolveWithGtsv(OpKernelContext* context,
-                     std::unique_ptr<CudaSparse>& cusparse_solver,
+                     std::unique_ptr<GpuSparse>& cusparse_solver,
                      const Scalar* superdiag, const Scalar* diag,
                      const Scalar* subdiag, Scalar* rhs, const int num_eqs,
                      const int num_rhs) const {
-    auto function = pivoting_ ? &CudaSparse::Gtsv<Scalar>
-                              : &CudaSparse::GtsvNoPivot<Scalar>;
-    OP_REQUIRES_OK(
-        context, (cusparse_solver.get()->*function)(
-                     num_eqs, num_rhs, subdiag, diag, superdiag, rhs, num_eqs));
+    auto buffer_function = pivoting_
+                               ? &GpuSparse::Gtsv2BufferSizeExt<Scalar>
+                               : &GpuSparse::Gtsv2NoPivotBufferSizeExt<Scalar>;
+    size_t buffer_size;
+    OP_REQUIRES_OK(context, (cusparse_solver.get()->*buffer_function)(
+                                num_eqs, num_rhs, subdiag, diag, superdiag, rhs,
+                                num_eqs, &buffer_size));
+    Tensor temp_tensor;
+    TensorShape temp_shape({static_cast<int64>(buffer_size)});
+    OP_REQUIRES_OK(context,
+                   context->allocate_temp(DT_UINT8, temp_shape, &temp_tensor));
+    void* buffer = temp_tensor.flat<std::uint8_t>().data();
+
+    auto solver_function = pivoting_ ? &GpuSparse::Gtsv2<Scalar>
+                                     : &GpuSparse::Gtsv2NoPivot<Scalar>;
+    OP_REQUIRES_OK(context, (cusparse_solver.get()->*solver_function)(
+                                num_eqs, num_rhs, subdiag, diag, superdiag, rhs,
+                                num_eqs, buffer));
   }
 
   void SolveForSizeOneOrTwo(OpKernelContext* context, const Scalar* diagonals,
                             const Scalar* rhs, Scalar* output, int m, int k) {
     const Eigen::GpuDevice& device = context->eigen_device<Eigen::GpuDevice>();
-    CudaLaunchConfig cfg = GetCudaLaunchConfig(1, device);
+    GpuLaunchConfig cfg = GetGpuLaunchConfig(1, device);
     bool* not_invertible_dev;
     cudaMalloc(&not_invertible_dev, sizeof(bool));
-    TF_CHECK_OK(CudaLaunchKernel(SolveForSizeOneOrTwoKernel<Scalar>,
-                                 cfg.block_count, cfg.thread_per_block, 0,
-                                 device.stream(), m, diagonals, rhs, k, output,
-                                 not_invertible_dev));
+    TF_CHECK_OK(GpuLaunchKernel(SolveForSizeOneOrTwoKernel<Scalar>,
+                                cfg.block_count, cfg.thread_per_block, 0,
+                                device.stream(), m, diagonals, rhs, k, output,
+                                not_invertible_dev));
     bool not_invertible_host;
     cudaMemcpy(&not_invertible_host, not_invertible_dev, sizeof(bool),
                cudaMemcpyDeviceToHost);
@@ -289,12 +307,22 @@ class TridiagonalSolveOpGpu : public OpKernel {
                        rhs.flat<Scalar>().size());
     Scalar* x = output->flat<Scalar>().data();
 
-    std::unique_ptr<CudaSparse> cusparse_solver(new CudaSparse(context));
+    std::unique_ptr<GpuSparse> cusparse_solver(new GpuSparse(context));
 
     OP_REQUIRES_OK(context, cusparse_solver->Initialize());
-    OP_REQUIRES_OK(context, cusparse_solver->GtsvStridedBatch(
+
+    size_t buffer_size;
+    OP_REQUIRES_OK(context, cusparse_solver->Gtsv2StridedBatchBufferSizeExt(
                                 matrix_size, subdiag, diag, superdiag, x,
-                                batch_size, matrix_size));
+                                batch_size, matrix_size, &buffer_size));
+    Tensor temp_tensor;
+    TensorShape temp_shape({static_cast<int64>(buffer_size)});
+    OP_REQUIRES_OK(context,
+                   context->allocate_temp(DT_UINT8, temp_shape, &temp_tensor));
+    void* buffer = temp_tensor.flat<std::uint8_t>().data();
+    OP_REQUIRES_OK(context, cusparse_solver->Gtsv2StridedBatch(
+                                matrix_size, subdiag, diag, superdiag, x,
+                                batch_size, matrix_size, buffer));
   }
 
   void TransposeLhsForGtsvBatched(OpKernelContext* context, const Tensor& lhs,

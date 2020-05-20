@@ -28,16 +28,17 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/common/operations.h"
 #include "tensorflow/lite/delegates/gpu/common/shape.h"
 #include "tensorflow/lite/delegates/gpu/common/tensor.h"
+#include "tensorflow/lite/delegates/gpu/common/util.h"
 #include "tensorflow/lite/delegates/gpu/metal/compute_task_descriptor.h"
 #include "tensorflow/lite/delegates/gpu/metal/runtime_options.h"
 
 namespace tflite {
 namespace gpu {
 namespace metal {
-
-std::vector<ComputeTaskDescriptorPtr> Multiply(
-    int id, ValueId input_id, ValueId output_id,
-    const MultiplyScalarAttributes& attr, const RuntimeOptions& options) {
+std::vector<ComputeTaskDescriptorPtr> Multiply(int id, ValueId input_id,
+                                               ValueId output_id,
+                                               const MultiplyAttributes& attr,
+                                               const RuntimeOptions& options) {
   auto desc = std::make_shared<ComputeTaskDescriptor>();
   desc->id = id;
   desc->is_linkable = true;
@@ -61,7 +62,7 @@ std::vector<ComputeTaskDescriptorPtr> Multiply(
   desc->output_buffer = {output_id};
   if (scalar) {
     std::vector<uint8_t> multiplier_bits =
-        VectorToUint8Vector(std::vector<float>{*multiplier});
+        GetByteBuffer(std::vector<float>{*multiplier});
     desc->uniform_buffers = {
         {"constant float&",
          [multiplier_bits](const std::map<ValueId, BHWC>& buffers) {
@@ -69,11 +70,9 @@ std::vector<ComputeTaskDescriptorPtr> Multiply(
          }},
     };
   } else {
-    auto coeffs = options.storage_precision == RuntimeOptions::Precision::FP32
-                      ? VectorToUint8Vector(mul_buffer->data)
-                      : VectorFloatToHalf(mul_buffer->data);
     desc->immutable_buffers = {
-        {"device FLT4* const", coeffs},
+        {"device FLT4* const",
+         GetByteBufferConverted(mul_buffer->data, options.storage_precision)},
     };
   }
   return {desc};

@@ -82,16 +82,23 @@ struct RngSkip_Philox;
 
 using CPUDevice = Eigen::ThreadPoolDevice;
 
-#if GOOGLE_CUDA
+struct UpdateVariableAndFill_Philox_Arg {
+  int64 output_size;
+  int64 alg_tag_skip;
+  ScopedUnlockUnrefVar* not_used;
+  Tensor* state_tensor;
+};
+
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 using GPUDevice = Eigen::GpuDevice;
 
 // Declares the partially GPU-specialized functor structs.
+// must be kept at <=6 arguments because of a gcc/clang ABI incompatibility bug
 template <typename Distribution>
 struct UpdateVariableAndFill_Philox<GPUDevice, Distribution> {
   void operator()(OpKernelContext* ctx, const GPUDevice& device,
-                  Distribution dist, int64 output_size, int64 alg_tag_skip,
-                  ScopedUnlockUnrefVar* not_used, Tensor* state_tensor,
+                  Distribution dist, UpdateVariableAndFill_Philox_Arg* arg,
                   typename Distribution::ResultElementType* output_data);
 };
 
@@ -100,7 +107,7 @@ struct RngSkip_Philox<GPUDevice> {
   void operator()(const GPUDevice& device, int64 delta, Tensor* state_tensor);
 };
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 }  // end namespace tensorflow
 

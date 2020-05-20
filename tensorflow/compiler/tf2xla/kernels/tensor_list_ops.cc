@@ -18,6 +18,7 @@ limitations under the License.
 #include <limits>
 #include <vector>
 
+#include "tensorflow/compiler/tf2xla/kernels/gather_op_helpers.h"
 #include "tensorflow/compiler/tf2xla/kernels/tensor_list_utils.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
@@ -42,6 +43,36 @@ limitations under the License.
 namespace tensorflow {
 
 namespace {
+
+// GetTensorListDynamicDims collects the dynamic dimensions that a tensorlist
+// may carry and returns them in a 2D vector: int64[ElementSize][DimSize]. If a
+// dimension is static, a constant dimension is returned.
+xla::StatusOr<std::vector<std::vector<xla::XlaOp>>> GetTensorListDynamicDims(
+    XlaOpKernelContext* ctx, const xla::Shape& element_shape,
+    const xla::Shape& list_shape, int64 num_elements) {
+  std::vector<int64> dynamic_sizes;
+  ctx->set_dynamic_dimension_is_minus_one(true);
+  // The multiplier can be a dynamic value.
+  TF_RETURN_IF_ERROR(ctx->ConstantInputAsIntVector(0, &dynamic_sizes));
+  std::vector<std::vector<xla::XlaOp>> list_dynamic_dims;
+  // Set dynamic dimension size to 0 for initialization value.
+  std::vector<xla::XlaOp> dynamic_dims;
+  // Leading dim is a static dimension.
+  dynamic_dims.push_back(xla::ConstantR0<int32>(ctx->builder(), num_elements));
+  for (int64 dim = 0; dim < element_shape.dimensions_size(); ++dim) {
+    if (ctx->is_dynamic_dimension(dynamic_sizes[dim])) {
+      auto dynamic_dim_size = xla::Slice(ctx->Input(0), {dim}, {dim + 1}, {1});
+      dynamic_dim_size = xla::Reshape(dynamic_dim_size, {});
+      dynamic_dim_size = xla::ConvertElementType(dynamic_dim_size, xla::S32);
+      dynamic_dims.push_back(dynamic_dim_size);
+    } else {
+      dynamic_dims.push_back(
+          xla::ConstantR0<int32>(ctx->builder(), dynamic_sizes[dim]));
+    }
+  }
+  list_dynamic_dims.push_back(dynamic_dims);
+  return list_dynamic_dims;
+}
 
 class TensorListLengthOp : public XlaOpKernel {
  public:
@@ -123,10 +154,14 @@ class TensorListReserveOp : public XlaOpKernel {
       xla::Shape list_shape;
       OP_REQUIRES_OK(ctx, GetTensorListShapeFromElementShape(
                               element_shape, num_elements, &list_shape));
-
+      // Set up dynamic dimension sizes to create the zero tensor.
+      auto list_dynamic_dims_or = GetTensorListDynamicDims(
+          ctx, element_shape, list_shape, num_elements);
+      OP_REQUIRES_OK(ctx, list_dynamic_dims_or.status());
       xla::XlaOp new_list;
       OP_REQUIRES_OK(ctx, CreateZerosTensorListWithShape(
-                              ctx->builder(), list_shape, &new_list));
+                              ctx->builder(), list_shape,
+                              list_dynamic_dims_or.ValueOrDie(), &new_list));
       xla::XlaOp result;
       OP_REQUIRES_OK(
           ctx,
@@ -184,10 +219,16 @@ class EmptyTensorListOp : public XlaOpKernel {
         xla::Shape list_shape;
         OP_REQUIRES_OK(ctx, GetTensorListShapeFromElementShape(
                                 element_shape, max_num_elements, &list_shape));
+        // Set up dynamic dimension sizes to create the zero tensor.
+        auto list_dynamic_dims_or = GetTensorListDynamicDims(
+            ctx, element_shape, list_shape, max_num_elements);
+        OP_REQUIRES_OK(ctx, list_dynamic_dims_or.status());
 
         xla::XlaOp result;
         OP_REQUIRES_OK(ctx, CreateZerosTensorListWithShape(
-                                ctx->builder(), list_shape, &result));
+                                ctx->builder(), list_shape,
+                                list_dynamic_dims_or.ValueOrDie(), &result));
+
         ctx->SetTensorListOutput(0, result);
         return;
       }
@@ -266,7 +307,8 @@ class TensorListElementShapeOp : public XlaOpKernel {
   TF_DISALLOW_COPY_AND_ASSIGN(TensorListElementShapeOp);
 };
 
-REGISTER_XLA_OP(Name("TensorListElementShape"), TensorListElementShapeOp);
+REGISTER_XLA_OP(Name("TensorListElementShape").IsMetadataOp(),
+                TensorListElementShapeOp);
 
 class TensorListGetItemOp : public XlaOpKernel {
  public:
@@ -305,6 +347,59 @@ class TensorListGetItemOp : public XlaOpKernel {
 };
 
 REGISTER_XLA_OP(Name("TensorListGetItem"), TensorListGetItemOp);
+
+class TensorListGatherOp : public XlaOpKernel {
+ public:
+  explicit TensorListGatherOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("element_dtype", &dtype_));
+  }
+
+  void Compile(XlaOpKernelContext* ctx) override {
+    // Check that the TensorList is initialized.
+    bool is_initialized;
+    OP_REQUIRES_OK(ctx,
+                   (IsTensorListInitialized(ctx->Input(0), &is_initialized)));
+    OP_REQUIRES(ctx, is_initialized,
+                errors::InvalidArgument("TensorList is not initialized"));
+
+    // Only non-nested TensorList is supported for now.
+    bool is_nested;
+    OP_REQUIRES_OK(ctx, IsNestedTensorList(ctx->Input(0), &is_nested));
+    OP_REQUIRES(ctx, !is_nested,
+                errors::Unimplemented("Only non-nested TensorList is supported "
+                                      "for TensorListGather."));
+
+    DataType indices_type = ctx->input_type(1);
+
+    const TensorShape indices_shape = ctx->InputShape(1);
+    OP_REQUIRES(ctx, indices_shape.dims() == 1,
+                errors::InvalidArgument("indices must be rank 1"));
+
+    xla::XlaOp list = ctx->Input(0);
+    xla::XlaOp indices = ctx->Input(1);
+
+    xla::XlaOp buffer;
+    OP_REQUIRES_OK(ctx, GetTensorListBuffer(list, &buffer));
+    xla::Shape buffer_xla_shape;
+    OP_REQUIRES_OK(ctx, GetTensorListBufferShape(list, &buffer_xla_shape));
+    TensorShape buffer_shape;
+    OP_REQUIRES_OK(ctx, XLAShapeToTensorShape(buffer_xla_shape, &buffer_shape));
+
+    xla::XlaOp result;
+    OP_REQUIRES_OK(
+        ctx, XlaGather(buffer, buffer_shape, indices, indices_shape, /*axis=*/0,
+                       /*indices_are_nd=*/false, dtype_, indices_type,
+                       ctx->builder(), &result));
+    ctx->SetOutput(0, result);
+  }
+
+ private:
+  DataType dtype_;
+
+  TF_DISALLOW_COPY_AND_ASSIGN(TensorListGatherOp);
+};
+
+REGISTER_XLA_OP(Name("TensorListGather"), TensorListGatherOp);
 
 class TensorListStackOp : public XlaOpKernel {
  public:

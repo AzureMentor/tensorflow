@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/device_set.h"
+#include "tensorflow/core/common_runtime/graph_constructor.h"
 #include "tensorflow/core/common_runtime/optimization_registry.h"
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/device_attributes.pb.h"
@@ -34,7 +35,6 @@ limitations under the License.
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/graph/graph.h"
-#include "tensorflow/core/graph/graph_constructor.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/env.h"
@@ -111,8 +111,8 @@ Status OptimizationPassRunner::Run(absl::string_view pass_to_run,
   GraphConstructorOptions graph_opts;
   graph_opts.expect_device_spec = true;
   graph_opts.allow_internal_ops = true;
-  TF_RETURN_IF_ERROR(
-      ConvertGraphDefToGraph(graph_opts, input, options.graph->get()));
+  TF_RETURN_IF_ERROR(ConvertGraphDefToGraph(graph_opts, std::move(input),
+                                            options.graph->get()));
 
   // Add all devices that were previously configured with AddDevice.
   DeviceSet device_set;

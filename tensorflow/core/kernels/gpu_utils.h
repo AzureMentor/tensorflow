@@ -16,7 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_GPU_UTILS_H_
 #define TENSORFLOW_CORE_KERNELS_GPU_UTILS_H_
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #include <unordered_map>
 
@@ -29,10 +29,35 @@ limitations under the License.
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/stream_executor.h"
 
+namespace stream_executor {
+class RedzoneAllocator;
+}  // namespace stream_executor
+
 namespace tensorflow {
 
 class NodeDef;
 class AutotuneResult;
+
+// Return whether the redzone check is disabled.
+//
+// Controlled by the TF_DISABLE_RZ_CHECK environment variable.
+bool RedzoneCheckDisabled();
+
+// Return an allocated buffer with redzones the size of `buffer`. Does
+// *not* copy the contents of the `buffer` into the newly allocated buffer:
+// assumes that buffer is a pure out-parameter.
+//
+// Returns `buffer` if RedzoneCheckDisabled() is true.
+//
+// On error, return `buffer`, and log an error message (once).
+se::DeviceMemoryBase WrapRedzoneBestEffort(se::RedzoneAllocator* rz_allocator,
+                                           se::DeviceMemoryBase buffer);
+
+// Check the passed allocator for redzone violations.
+// If violations have occurred, mark the corresponding autotune result
+// as a failure.
+void CheckRedzones(const se::RedzoneAllocator& rz_allocator,
+                   tensorflow::AutotuneResult* autotune_result);
 
 template <typename T>
 inline se::DeviceMemory<T> AsDeviceMemory(const T* cuda_memory, uint64 size) {
@@ -163,7 +188,7 @@ class AutoTuneMap {
     int32 count;
   };
   std::unordered_map<Parameters, ValueType, Hasher> params_config_map_
-      GUARDED_BY(mu_);
+      TF_GUARDED_BY(mu_);
   string name_;
   int32 min_score_threshold_;
   int32 max_autotune_count_;
@@ -190,6 +215,9 @@ class AutoTuneSingleton {
 // Logs convolution results to customized back-storage.
 void LogConvAutotuneResults(se::dnn::ConvolutionKind kind,
                             se::dnn::DataType element_type,
+                            se::DeviceMemoryBase input_buffer,
+                            se::DeviceMemoryBase filter_buffer,
+                            se::DeviceMemoryBase output_buffer,
                             const se::dnn::BatchDescriptor& input_desc,
                             const se::dnn::FilterDescriptor& filter_desc,
                             const se::dnn::BatchDescriptor& output_desc,
@@ -198,8 +226,10 @@ void LogConvAutotuneResults(se::dnn::ConvolutionKind kind,
                             absl::Span<const AutotuneResult> results);
 
 // Logs fused convolution results to customized back-storage.
-void LogFusedConvAutotuneResults(
-    se::dnn::ConvolutionKind kind, se::dnn::DataType element_type,
+void LogFusedConvForwardAutotuneResults(
+    se::dnn::DataType element_type, se::DeviceMemoryBase input_buffer,
+    se::DeviceMemoryBase filter_buffer, se::DeviceMemoryBase output_buffer,
+    se::DeviceMemoryBase bias_buffer, se::DeviceMemoryBase side_input_buffer,
     const se::dnn::BatchDescriptor& input_desc,
     const se::dnn::FilterDescriptor& filter_desc,
     const se::dnn::BatchDescriptor& output_desc,
@@ -208,13 +238,13 @@ void LogFusedConvAutotuneResults(
     se::StreamExecutor* stream_exec, absl::Span<const AutotuneResult> results);
 
 // Returns the best algorithms for the config, one is the fastest, the other is
-// other is fastest with 0 scracth space. Unsuccessful autotuning results are
+// other is fastest with 0 scratch space. Unsuccessful autotuning results are
 // allowed and ignored.
 Status BestCudnnConvAlgorithm(absl::Span<const AutotuneResult> results,
                               se::dnn::AlgorithmConfig* algo);
 
 }  // namespace tensorflow
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #endif  // TENSORFLOW_CORE_KERNELS_GPU_UTILS_H_

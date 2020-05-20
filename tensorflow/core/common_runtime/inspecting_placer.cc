@@ -21,11 +21,13 @@ limitations under the License.
 #include "absl/strings/str_join.h"
 #include "tensorflow/core/common_runtime/colocation_graph.h"
 #include "tensorflow/core/common_runtime/device.h"
-#include "tensorflow/core/common_runtime/function.h"
+#include "tensorflow/core/common_runtime/function_body.h"
+#include "tensorflow/core/common_runtime/function_def_utils.h"
 #include "tensorflow/core/common_runtime/placer_inspection_required_ops_utils.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/graph/graph_node_util.h"
 #include "tensorflow/core/lib/core/errors.h"
 
 namespace tensorflow {
@@ -108,15 +110,13 @@ class ColocationGraphToIOColocationGroups {
   int next_group_id_;
 };
 
-InspectingPlacer::InspectingPlacer(const Graph* graph,
-                                   const FunctionStack& stack,
+InspectingPlacer::InspectingPlacer(const FunctionStack& stack,
                                    const FunctionLibraryDefinition* flib_def,
                                    const DeviceSet* device_set,
                                    const Device* default_device,
                                    bool allow_soft_placement,
                                    bool log_device_placement)
-    : graph_(*graph),
-      stack_(stack),
+    : stack_(stack),
       flib_def_(*flib_def),
       device_set_(*device_set),
       default_device_(default_device),

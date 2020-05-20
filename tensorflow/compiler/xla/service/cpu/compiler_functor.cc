@@ -66,13 +66,13 @@ class FilteredPassManager : public llvm::legacy::PassManager {
   explicit FilteredPassManager(bool disable_expensive_passes)
       : disable_expensive_passes_(disable_expensive_passes) {}
   void add(llvm::Pass* p) override {
-    if (disable_expensive_passes_) {
-      llvm::StringRef PassName = p->getPassName();
-      if (PassName.contains("Unroll loops")) {
-        return;
-      }
+    bool pass_disabled =
+        disable_expensive_passes_ && p->getPassName().contains("Unroll loops");
+    if (!pass_disabled) {
+      llvm::legacy::PassManager::add(p);
+    } else {
+      delete p;
     }
-    llvm::legacy::PassManager::add(p);
   }
 
  private:
@@ -123,10 +123,7 @@ std::unique_ptr<llvm::MemoryBuffer> CompilerFunctor::operator()(
 
   CHECK(!llvm::verifyModule(module, &llvm::dbgs()));
 
-  const auto& opts = target_machine_->Options;
-  bool fast_math_enabled = opts.UnsafeFPMath && opts.NoInfsFPMath &&
-                           opts.NoNaNsFPMath && opts.NoSignedZerosFPMath;
-  runtime::RewriteIRRuntimeFunctions(&module, fast_math_enabled);
+  runtime::RewriteIRRuntimeFunctions(&module, fast_math_flags_);
 
   // Buffer for holding machine code prior to constructing the ObjectFile.
   llvm::SmallVector<char, 0> stream_buffer;
@@ -169,17 +166,26 @@ static std::vector<llvm::VecDesc> VectorFunctionsForTargetLibraryInfoImpl() {
       {"tanhf", runtime::kTanhV8F32SymbolName, 8},
       {"llvm.tanh.f32", runtime::kTanhV8F32SymbolName, 8},
 
+      {"tanhf", runtime::kTanhV16F32SymbolName, 16},
+      {"llvm.tanh.f32", runtime::kTanhV16F32SymbolName, 16},
+
       {"expf", runtime::kExpV4F32SymbolName, 4},
       {"llvm.exp.f32", runtime::kExpV4F32SymbolName, 4},
 
       {"expf", runtime::kExpV8F32SymbolName, 8},
       {"llvm.exp.f32", runtime::kExpV8F32SymbolName, 8},
 
+      {"expf", runtime::kExpV16F32SymbolName, 16},
+      {"llvm.exp.f32", runtime::kExpV16F32SymbolName, 16},
+
       {"logf", runtime::kLogV4F32SymbolName, 4},
       {"llvm.log.f32", runtime::kLogV4F32SymbolName, 4},
 
       {"logf", runtime::kLogV8F32SymbolName, 8},
       {"llvm.log.f32", runtime::kLogV8F32SymbolName, 8},
+
+      {"logf", runtime::kLogV16F32SymbolName, 16},
+      {"llvm.log.f32", runtime::kLogV16F32SymbolName, 16},
   };
   return result;
 }
@@ -191,6 +197,7 @@ void CompilerFunctor::AddTargetInfoPasses(
       absl::make_unique<llvm::TargetLibraryInfoImpl>(target_triple);
   target_library_info_impl->addVectorizableFunctions(
       VectorFunctionsForTargetLibraryInfoImpl());
+
   passes->add(
       new llvm::TargetLibraryInfoWrapperPass(*target_library_info_impl));
   passes->add(createTargetTransformInfoWrapperPass(

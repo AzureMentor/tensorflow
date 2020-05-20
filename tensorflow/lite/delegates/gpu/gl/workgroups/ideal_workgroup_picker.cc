@@ -18,10 +18,10 @@ limitations under the License.
 #include <map>
 #include <vector>
 
+#include "tensorflow/lite/delegates/gpu/common/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/common/operations.h"
 #include "tensorflow/lite/delegates/gpu/common/shape.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
-#include "tensorflow/lite/delegates/gpu/gl/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/gl/workgroups/calculator.h"
 
 namespace tflite {
@@ -33,8 +33,8 @@ namespace {
 // (b/117291356).
 
 // Describes the ideal convolution for the specific operation case
-// Case here means specific "kernel + strides" conbination for specific
-// operatoins type, not sizes of input and output tensors, they can be any.
+// Case here means specific "kernel + strides" combination for specific
+// operations type, not sizes of input and output tensors, they can be any.
 struct IdealByCase {
   bool ParamsAccepted(OperationType in_op_type, HW in_kernel,
                       HW in_strides) const {

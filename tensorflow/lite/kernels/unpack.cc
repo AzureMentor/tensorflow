@@ -14,7 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/c_api_internal.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/kernels/internal/reference/reference_ops.h"
 #include "tensorflow/lite/kernels/internal/tensor.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
@@ -35,16 +35,17 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   TF_LITE_ENSURE_EQ(context, NumOutputs(node), data->num);
 
   const TfLiteTensor* input = GetInput(context, node, kInputTensor);
-  TF_LITE_ENSURE(context, NumDimensions(input) <= 4);
-  TF_LITE_ENSURE(context, NumDimensions(input) > 1);
+  TF_LITE_ENSURE(context, NumElements(input) > 0);
   int axis = data->axis;
   if (axis < 0) {
     axis += NumDimensions(input);
   }
   TF_LITE_ENSURE(context, 0 <= axis && axis < NumDimensions(input));
-  if (input->type != kTfLiteInt32 && input->type != kTfLiteFloat32) {
-    context->ReportError(context,
-                         "Currently pack only supports int32 and float32.");
+  if (input->type != kTfLiteInt32 && input->type != kTfLiteFloat32 &&
+      input->type != kTfLiteUInt8 && input->type != kTfLiteInt8 &&
+      input->type != kTfLiteInt16 && input->type != kTfLiteBool) {
+    context->ReportError(context, "Type '%s' is not supported by unpack.",
+                         TfLiteTypeGetName(input->type));
     return kTfLiteError;
   }
 
@@ -64,6 +65,11 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
     TfLiteIntArray* copied_output_shape = TfLiteIntArrayCopy(output_shape);
     TfLiteTensor* output = GetOutput(context, node, i);
     TF_LITE_ENSURE_EQ(context, output->type, input->type);
+    // Guarantee input/output quantization params match as we do not support
+    // rescaling of unpacked quantized tensors.
+    TF_LITE_ENSURE_EQ(context, input->params.zero_point,
+                      output->params.zero_point);
+    TF_LITE_ENSURE_EQ(context, input->params.scale, output->params.scale);
     TF_LITE_ENSURE_OK(
         context, context->ResizeTensor(context, output, copied_output_shape));
   }
@@ -98,9 +104,25 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
       UnpackImpl<int32_t>(context, node, input, data->num, data->axis);
       break;
     }
+    case kTfLiteUInt8: {
+      UnpackImpl<uint8_t>(context, node, input, data->num, data->axis);
+      break;
+    }
+    case kTfLiteInt8: {
+      UnpackImpl<int8_t>(context, node, input, data->num, data->axis);
+      break;
+    }
+    case kTfLiteBool: {
+      UnpackImpl<bool>(context, node, input, data->num, data->axis);
+      break;
+    }
+    case kTfLiteInt16: {
+      UnpackImpl<int16_t>(context, node, input, data->num, data->axis);
+      break;
+    }
     default: {
-      context->ReportError(context,
-                           "Currently pack only supports int32 and float32.");
+      context->ReportError(context, "Type '%s' is not supported by unpack.",
+                           TfLiteTypeGetName(input->type));
       return kTfLiteError;
     }
   }

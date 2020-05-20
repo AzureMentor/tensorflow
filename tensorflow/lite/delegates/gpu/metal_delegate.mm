@@ -28,7 +28,7 @@ limitations under the License.
 
 #include "absl/types/span.h"
 #include "tensorflow/lite/builtin_ops.h"
-#include "tensorflow/lite/c/c_api_internal.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/delegates/gpu/common/convert.h"
 #include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/model_builder.h"
@@ -40,6 +40,7 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/metal/api.h"
 #include "tensorflow/lite/delegates/gpu/metal/buffer_convert.h"
 #include "tensorflow/lite/delegates/gpu/metal/common.h"
+#include "tensorflow/lite/delegates/gpu/metal/environment.h"
 #include "tensorflow/lite/delegates/gpu/metal/compiled_model.h"
 #include "tensorflow/lite/delegates/gpu/metal/inference_context.h"
 #include "tensorflow/lite/delegates/gpu/metal/runtime_options.h"
@@ -107,29 +108,33 @@ class GpuAlarmClock {
       total_alarms_ = 1;
       NSString* error;
       id<MTLComputePipelineState> program;
+      // TODO(impjdi): Properly handle returned status.
       CreateComputeProgram(device_,
                            @"kernel void ComputeFunction(device int* output_buffer [[buffer(0)]]) "
                            @"{ output_buffer[0] = 0; }",
-                           @"ComputeFunction", nullptr, &program);
+                           @"ComputeFunction", nullptr, &program)
+          .IgnoreError();
       stub_program_ = program;
       stub_buffer_ = [device_ newBufferWithLength:sizeof(int) * 4
                                           options:MTLResourceHazardTrackingModeUntracked];
       alarm_thread_ = std::thread([this]() {
         id<MTLCommandBuffer> prev_command_buffer;
         while (!release_thread_) {
-          if (active_alarms_ == total_alarms_) {
-            id<MTLCommandBuffer> command_buffer = [command_queue_ commandBuffer];
-            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-            [encoder setComputePipelineState:stub_program_];
-            [encoder setBuffer:stub_buffer_ offset:0 atIndex:0];
-            [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
-                    threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-            [encoder endEncoding];
-            [command_buffer commit];
-            if (prev_command_buffer != nil) [prev_command_buffer waitUntilScheduled];
-            prev_command_buffer = command_buffer;
-          } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          @autoreleasepool {
+            if (active_alarms_ == total_alarms_) {
+              id<MTLCommandBuffer> command_buffer = [command_queue_ commandBuffer];
+              id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+              [encoder setComputePipelineState:stub_program_];
+              [encoder setBuffer:stub_buffer_ offset:0 atIndex:0];
+              [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                      threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+              [encoder endEncoding];
+              [command_buffer commit];
+              if (prev_command_buffer != nil) [prev_command_buffer waitUntilScheduled];
+              prev_command_buffer = command_buffer;
+            } else {
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
           }
         }
       });
@@ -165,17 +170,17 @@ class Delegate {
   };
 
  public:
-  explicit Delegate(const GpuDelegateOptions* options) {
+  explicit Delegate(const TFLGpuDelegateOptions* options) {
     if (options) {
       options_ = *options;
     } else {
       // Default options.
       options_.allow_precision_loss = false;
-      options_.wait_type = GpuDelegateOptions::WaitType::kPassive;
+      options_.wait_type = TFLGpuDelegateWaitType::TFLGpuDelegateWaitTypePassive;
     }
     metal_device_ = MTLCreateSystemDefaultDevice();
     command_queue_ = [metal_device_ newCommandQueue];
-    if (options_.wait_type == GpuDelegateOptions::WaitType::kAggressive) {
+    if (options_.wait_type == TFLGpuDelegateWaitType::TFLGpuDelegateWaitTypeAggressive) {
       gpu_alarm_clock_ = std::unique_ptr<GpuAlarmClock>(new GpuAlarmClock(command_queue_));
       NSString* code = @R"(
           kernel void ComputeFunction(device int* output_buffer [[buffer(0)]],
@@ -185,7 +190,9 @@ class Delegate {
         )";
       NSString* error;
       id<MTLComputePipelineState> signal_program;
-      CreateComputeProgram(metal_device_, code, @"ComputeFunction", nullptr, &signal_program);
+      // TODO(impjdi): Properly handle returned status.
+      CreateComputeProgram(metal_device_, code, @"ComputeFunction", nullptr, &signal_program)
+          .IgnoreError();
       signal_program_ = signal_program;
       signal_buffer_ = [metal_device_ newBufferWithLength:sizeof(int) * 4
                                                   options:MTLResourceStorageModeShared |
@@ -193,13 +200,13 @@ class Delegate {
     }
   }
 
-  Status BindBufferToTensor(id<MTLBuffer> buffer, int tensor_index) {
+  absl::Status BindBufferToTensor(id<MTLBuffer> buffer, int tensor_index) {
     for (auto& input : graph_inputs_) {
       if (input.tensor_id == tensor_index) {
         input_output_buffers_[input.id] = buffer;
         bphwc4_buffers_[input.id] = buffer;
         input.set_externally = true;
-        return OkStatus();
+        return absl::OkStatus();
       }
     }
     for (auto& output : graph_outputs_) {
@@ -207,10 +214,10 @@ class Delegate {
         input_output_buffers_[output.id] = buffer;
         bphwc4_buffers_[output.id] = buffer;
         output.set_externally = true;
-        return OkStatus();
+        return absl::OkStatus();
       }
     }
-    return NotFoundError("Couldn't find tensor: " + std::to_string(tensor_index));
+    return absl::NotFoundError("Couldn't find tensor: " + std::to_string(tensor_index));
   }
 
   void SetCommandEncoder(
@@ -220,8 +227,8 @@ class Delegate {
     external_command_encoder_ = encoder;
   }
 
-  Status Prepare(TfLiteContext* context, const TfLiteDelegateParams* delegate_params) {
-    // Extract TFLite delegate execution plan from the context and convert it into FlowGraph32.
+  absl::Status Prepare(TfLiteContext* context, const TfLiteDelegateParams* delegate_params) {
+    // Extract TFLite delegate execution plan from the context and convert it into GraphFloat32.
     GraphFloat32 graph;
     RETURN_IF_ERROR(BuildModel(context, delegate_params, &graph));
 
@@ -229,12 +236,12 @@ class Delegate {
     NullTransformationReporter reporter;
     ModelTransformer transformer(&graph, &reporter);
     if (!ApplyGeneralTransformations(&transformer)) {
-      return InternalError("Graph general transformations failed");
+      return absl::InternalError("Graph general transformations failed");
     }
 
     // TODO(impjdi): Remove code duplication.
     auto values = graph.values();
-    auto find_value = [&](int tensor_index) -> Value<TensorRefFloat32>* {
+    auto find_value = [&](int tensor_index) -> Value* {
       for (auto value : values) {
         if (value->tensor.ref == tensor_index) return value;
       }
@@ -260,7 +267,7 @@ class Delegate {
       if (tensor->allocation_type == TfLiteAllocationType::kTfLiteMmapRo) continue;
       const auto* input = find_value(tensor_index);
       if (!input || tensor->type != TfLiteType::kTfLiteFloat32) {
-        return NotFoundError("Input tensor is not found in the graph.");
+        return absl::NotFoundError("Input tensor is not found in the graph.");
       }
 
       inputs_.push_back(input->id);
@@ -278,7 +285,7 @@ class Delegate {
       auto* tensor = context->tensors + tensor_index;
       const auto* output = find_value(tensor_index);
       if (!output || tensor->type != TfLiteType::kTfLiteFloat32) {
-        return NotFoundError("Output tensor is not found in the graph.");
+        return absl::NotFoundError("Output tensor is not found in the graph.");
       }
 
       outputs_.push_back(output->id);
@@ -286,12 +293,18 @@ class Delegate {
       tensor->delegate = &delegate_;
     }
 
+    std::string device_name = std::string([[metal_device_ name] UTF8String]);
+    DeviceInfo device_info(device_name);
     size_t storage_type_size;
     RuntimeOptions runtime_options;
     if (options_.allow_precision_loss) {
       storage_type_size = sizeof(HalfBits);
       runtime_options.storage_precision = RuntimeOptions::Precision::FP16;
-      runtime_options.accumulator_precision = RuntimeOptions::Precision::FP16;
+      if (device_info.IsRoundToNearestSupported()) {
+        runtime_options.accumulator_precision = RuntimeOptions::Precision::FP16;
+      } else {
+        runtime_options.accumulator_precision = RuntimeOptions::Precision::FP32;
+      }
     } else {
       storage_type_size = sizeof(float);
       runtime_options.storage_precision = RuntimeOptions::Precision::FP32;
@@ -308,7 +321,9 @@ class Delegate {
       const auto& input_tensor = tensors_[input];
       const auto tensor_id = input_tensor.tensor_id;
       input_ids.push_back(input);
-      if (input_tensor.shape.b != 1) return UnimplementedError("Batching is not supported yet.");
+      if (input_tensor.shape.b != 1) {
+        return absl::UnimplementedError("Batching is not supported yet.");
+      }
       input_dimensions[input] = input_tensor.shape;
       graph_inputs_.push_back({
           input,               // .id
@@ -331,7 +346,7 @@ class Delegate {
                                              isFloat16:options_.allow_precision_loss
                                        convertToPBHWC4:true];
           if (converter_to_BPHWC4_ == nil) {
-            return InternalError("Error initialization of input buffer converter");
+            return absl::InternalError("Error initialization of input buffer converter");
           }
         }
       } else {
@@ -368,7 +383,7 @@ class Delegate {
                                              isFloat16:options_.allow_precision_loss
                                        convertToPBHWC4:false];
           if (converter_from_BPHWC4_ == nil) {
-            return InternalError("Error initialization of output buffer converter");
+            return absl::InternalError("Error initialization of output buffer converter");
           }
         }
       } else {
@@ -378,7 +393,7 @@ class Delegate {
 
     // TODO(impjdi): Merge these.
     CompiledModel compiled_model;
-    RETURN_IF_ERROR(Compile(graph, runtime_options, &compiled_model));
+    RETURN_IF_ERROR(Compile(graph, device_info, runtime_options, &compiled_model));
     CompiledModel optimized_model;
     RETURN_IF_ERROR(ValidateOptimizeModel(input_ids, output_ids, compiled_model, &optimized_model));
 
@@ -391,11 +406,12 @@ class Delegate {
     RETURN_IF_ERROR([inference_context_ setInputDimensions:input_dimensions
                                           outputDimensions:&output_dimensions
                                            taskDescriptors:optimized_model]);
-    return OkStatus();
+    return absl::OkStatus();
   }
 
-  Status Invoke(TfLiteContext* context) {
-    if (options_.wait_type == GpuDelegateOptions::WaitType::kAggressive) gpu_alarm_clock_->Stop();
+  absl::Status Invoke(TfLiteContext* context) {
+    if (options_.wait_type == TFLGpuDelegateWaitType::TFLGpuDelegateWaitTypeAggressive)
+      gpu_alarm_clock_->Stop();
     // We need only synchronization so volatile works better than atomic which reads from global
     // memory each time.
     __block volatile bool buffer_completed = false;
@@ -427,30 +443,31 @@ class Delegate {
       }
     }
 
-    [inference_context_ encodeWithEncoder:encoder
-                       inputOutputBuffers:bphwc4_buffers_
-                             encoderBlock:^(bool isLast) {
-                               if (control_encoder_ != nullptr) {
-                                 return control_encoder_(isLast);
-                               }
-                               if (external_command_encoder_ != nil ||
-                                   options_.wait_type == GpuDelegateOptions::WaitType::kPassive) {
-                                 return encoder;
-                               }
-                               if (isLast) {
-                                 if (options_.wait_type == GpuDelegateOptions::WaitType::kActive) {
-                                   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
-                                     buffer_completed = true;
-                                   }];
-                                 }
-                               } else {
-                                 [encoder endEncoding];
-                                 [command_buffer commit];
-                                 command_buffer = [command_queue_ commandBuffer];
-                                 encoder = [command_buffer computeCommandEncoder];
-                               }
-                               return encoder;
-                             }];
+    [inference_context_
+         encodeWithEncoder:encoder
+        inputOutputBuffers:bphwc4_buffers_
+              encoderBlock:^(bool isLast) {
+                if (control_encoder_ != nullptr) {
+                  return control_encoder_(isLast);
+                }
+                if (external_command_encoder_ != nil ||
+                    options_.wait_type == TFLGpuDelegateWaitType::TFLGpuDelegateWaitTypePassive) {
+                  return encoder;
+                }
+                if (isLast) {
+                  if (options_.wait_type == TFLGpuDelegateWaitType::TFLGpuDelegateWaitTypeActive) {
+                    [command_buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+                      buffer_completed = true;
+                    }];
+                  }
+                } else {
+                  [encoder endEncoding];
+                  [command_buffer commit];
+                  command_buffer = [command_queue_ commandBuffer];
+                  encoder = [command_buffer computeCommandEncoder];
+                }
+                return encoder;
+              }];
     for (const auto& output : graph_outputs_) {
       if (output.set_externally) continue;
       if (bphwc4_buffers_[output.id] == input_output_buffers_[output.id]) continue;
@@ -463,16 +480,16 @@ class Delegate {
     if (external_command_encoder_ == nil) {
       [encoder endEncoding];
       [command_buffer commit];
-      if (options_.wait_type == GpuDelegateOptions::WaitType::kActive) {
+      if (options_.wait_type == TFLGpuDelegateWaitType::TFLGpuDelegateWaitTypeActive) {
         while (!buffer_completed) {
           // Busy wait. Use local variable. Volatile uses RAM access all the time.
           for (volatile int i = 0; i < 100; i++) {
           }
         }
-      } else if (options_.wait_type == GpuDelegateOptions::WaitType::kPassive) {
+      } else if (options_.wait_type == TFLGpuDelegateWaitType::TFLGpuDelegateWaitTypePassive) {
         // passive wait: this thread sleeps until GPU finishes.
         [command_buffer waitUntilCompleted];
-      } else if (options_.wait_type == GpuDelegateOptions::WaitType::kAggressive) {
+      } else if (options_.wait_type == TFLGpuDelegateWaitType::TFLGpuDelegateWaitTypeAggressive) {
         command_buffer = [command_queue_ commandBuffer];
         encoder = [command_buffer computeCommandEncoder];
         [encoder setComputePipelineState:signal_program_];
@@ -497,11 +514,11 @@ class Delegate {
       // External command encoder is assigned so all output buffers are controlled by a user.
       for (const auto& output : graph_outputs_) {
         if (!output.set_externally) {
-          return InternalError(
+          return absl::InternalError(
               "External command encoder is used, but not all output buffers are bound.");
         }
       }
-      return OkStatus();
+      return absl::OkStatus();
     }
 
     // Retrieve data from GPU and convert from PHWC4 to HWC.
@@ -512,7 +529,7 @@ class Delegate {
       const void* gpu_ptr = [input_output_buffers_[output.id] contents];
       std::memcpy(tensor->data.f, gpu_ptr, output.shape.DimensionsProduct() * sizeof(float));
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   TfLiteDelegate* tflite_delegate() { return &delegate_; }
@@ -527,7 +544,7 @@ class Delegate {
       kTfLiteDelegateFlagsNone,       // .flags
   };
 
-  GpuDelegateOptions options_;
+  TFLGpuDelegateOptions options_;
 
   id<MTLDevice> metal_device_;
 
@@ -578,7 +595,8 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
         // forbids that.
         const auto status = metal_delegate->Prepare(context, params);
         if (status.ok()) return metal_delegate;
-        context->ReportError(context, "TfLiteGpuDelegate Prepare: %s", status.message().data());
+        context->ReportError(context, "TfLiteGpuDelegate Prepare: %s",
+                             std::string(status.message()).c_str());
         return nullptr;
       },
       // .free
@@ -591,7 +609,8 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
       [](TfLiteContext* context, TfLiteNode* node) -> TfLiteStatus {
         const auto status = GetMetalDelegate(node)->Invoke(context);
         if (status.ok()) return kTfLiteOk;
-        context->ReportError(context, "TfLiteMetalDelegate Invoke: %s", status.message().data());
+        context->ReportError(context, "TfLiteMetalDelegate Invoke: %s",
+                             std::string(status.message()).c_str());
         return kTfLiteError;
       },
       nullptr,                // .profiling_string
@@ -611,22 +630,25 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
 }  // namespace gpu
 }  // namespace tflite
 
-TfLiteDelegate* NewGpuDelegate(const GpuDelegateOptions* options) {
+TfLiteDelegate* TFLGpuDelegateCreate(const TFLGpuDelegateOptions* options) {
   TFLITE_LOG_PROD_ONCE(tflite::TFLITE_LOG_INFO, "Created TensorFlow Lite delegate for Metal.");
   auto* metal_delegate = new ::tflite::gpu::metal::Delegate(options);
   return metal_delegate ? metal_delegate->tflite_delegate() : nullptr;
 }
 
-void DeleteGpuDelegate(TfLiteDelegate* delegate) {
+void TFLGpuDelegateDelete(TfLiteDelegate* delegate) {
   delete ::tflite::gpu::metal::GetMetalDelegate(delegate);
 }
 
-bool BindMetalBufferToTensor(TfLiteDelegate* delegate, int tensor_index, id<MTLBuffer> buffer) {
+bool TFLGpuDelegateBindMetalBufferToTensor(TfLiteDelegate* delegate, int tensor_index,
+                                           id<MTLBuffer> buffer) {
   auto* metal_delegate = ::tflite::gpu::metal::GetMetalDelegate(delegate);
   return metal_delegate && metal_delegate->BindBufferToTensor(buffer, tensor_index).ok();
 }
 
-bool TFLSetCommandEncoder(
+// Note: This function is not exposed in `metal_delegate.h`, but it's exposed in
+// `metal_delegate_internal.h`.
+bool TFLGpuDelegateSetCommandEncoder(
     TfLiteDelegate* delegate, id<MTLComputeCommandEncoder> encoder,
     std::function<id<MTLComputeCommandEncoder>(bool is_last)> control_encoder) {
   auto* metal_delegate = ::tflite::gpu::metal::GetMetalDelegate(delegate);

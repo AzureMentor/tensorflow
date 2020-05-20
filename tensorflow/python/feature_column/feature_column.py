@@ -166,6 +166,7 @@ from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import checkpoint_utils
 from tensorflow.python.util import nest
 from tensorflow.python.util.tf_export import tf_export
+from tensorflow.python.util.compat import collections_abc
 
 
 def _internal_input_layer(features,
@@ -408,6 +409,41 @@ def linear_model(features,
   prediction = linear_model(features, columns)
   ```
 
+  The `sparse_combiner` argument works as follows
+  For example, for two features represented as the categorical columns:
+
+  ```python
+    # Feature 1
+
+    shape = [2, 2]
+    {
+        [0, 0]: "a"
+        [0, 1]: "b"
+        [1, 0]: "c"
+    }
+
+    # Feature 2
+
+    shape = [2, 3]
+    {
+        [0, 0]: "d"
+        [1, 0]: "e"
+        [1, 1]: "f"
+        [1, 2]: "f"
+    }
+  ```
+
+  with `sparse_combiner` as "mean", the linear model outputs consequently
+  are:
+
+  ```
+    y_0 = 1.0 / 2.0 * ( w_a + w_b ) + w_d + b
+    y_1 = w_c + 1.0 / 3.0 * ( w_e + 2.0 * w_f ) + b
+  ```
+
+  where `y_i` is the output, `b` is the bias, and `w_x` is the weight
+  assigned to the presence of `x` in the input features.
+
   Args:
     features: A mapping from key to tensors. `_FeatureColumn`s look up via these
       keys. For example `numeric_column('price')` will look at 'price' key in
@@ -426,36 +462,6 @@ def linear_model(features,
         * "sum": do not normalize features in the column
         * "mean": do l1 normalization on features in the column
         * "sqrtn": do l2 normalization on features in the column
-      For example, for two features represented as the categorical columns:
-
-      ```python
-        # Feature 1
-
-        shape = [2, 2]
-        {
-            [0, 0]: "a"
-            [0, 1]: "b"
-            [1, 0]: "c"
-        }
-
-        # Feature 2
-
-        shape = [2, 3]
-        {
-            [0, 0]: "d"
-            [1, 0]: "e"
-            [1, 1]: "f"
-            [1, 2]: "f"
-        }
-      ```
-      with `sparse_combiner` as "mean", the linear model outputs consequently
-      are:
-      ```
-        y_0 = 1.0 / 2.0 * ( w_a + w_b ) + w_d + b
-        y_1 = w_c + 1.0 / 3.0 * ( w_e + 2.0 * w_f ) + b
-      ```
-      where `y_i` is the output, `b` is the bias, and `w_x` is the weight
-      assigned to the presence of `x` in the input features.
     weight_collections: A list of collection names to which the Variable will be
       added. Note that, variables will also be added to collections
       `tf.GraphKeys.GLOBAL_VARIABLES` and `ops.GraphKeys.MODEL_VARIABLES`.
@@ -815,7 +821,8 @@ def _embedding_column(categorical_column,
                       ckpt_to_load_from=None,
                       tensor_name_in_ckpt=None,
                       max_norm=None,
-                      trainable=True):
+                      trainable=True,
+                      use_safe_embedding_lookup=True):
   """`_DenseColumn` that converts from sparse, categorical input.
 
   Use this when your inputs are sparse, but you want to convert them to a dense
@@ -876,6 +883,13 @@ def _embedding_column(categorical_column,
       not `None`.
     max_norm: If not `None`, embedding values are l2-normalized to this value.
     trainable: Whether or not the embedding is trainable. Default is True.
+    use_safe_embedding_lookup: If true, uses safe_embedding_lookup_sparse
+      instead of embedding_lookup_sparse. safe_embedding_lookup_sparse ensures
+      there are no empty rows and all weights and ids are positive at the
+      expense of extra compute cost. This only applies to rank 2 (NxM) shaped
+      input tensors. Defaults to true, consider turning off if the above checks
+      are not needed. Note that having empty rows will not trigger any error
+      though the output result might be 0 or omitted.
 
   Returns:
     `_DenseColumn` that converts from sparse input.
@@ -920,7 +934,8 @@ def _embedding_column(categorical_column,
       ckpt_to_load_from=ckpt_to_load_from,
       tensor_name_in_ckpt=tensor_name_in_ckpt,
       max_norm=max_norm,
-      trainable=trainable)
+      trainable=trainable,
+      use_safe_embedding_lookup=use_safe_embedding_lookup)
 
 
 def _numeric_column(key,
@@ -1038,8 +1053,8 @@ def _bucketized_column(source_column, boundaries):
   dense_tensor = input_layer(features, columns)
   ```
 
-  `bucketized_column` can also be crossed with another categorical column using
-  `crossed_column`:
+  A `bucketized_column` can also be crossed with another categorical column
+  using `crossed_column`:
 
   ```python
   price = numeric_column('price')
@@ -1415,9 +1430,9 @@ def _categorical_column_with_identity(key, num_buckets, default_value=None):
       column name and the dictionary key for feature parsing configs, feature
       `Tensor` objects, and feature columns.
     num_buckets: Range of inputs and outputs is `[0, num_buckets)`.
-    default_value: If `None`, this column's graph operations will fail for
-      out-of-range inputs. Otherwise, this value must be in the range
-      `[0, num_buckets)`, and will replace inputs in that range.
+    default_value: If set, values outside of range `[0, num_buckets)` will
+      be replaced with this value. If not set, values >= num_buckets will
+      cause a failure while values < 0 will be dropped.
 
   Returns:
     A `_CategoricalColumn` that returns identity values.
@@ -1752,6 +1767,67 @@ class _FeatureColumn(object):
     """Returns string. Used for naming and for name_scope."""
     pass
 
+  def __lt__(self, other):
+    """Allows feature columns to be sorted in Python 3 as they are in Python 2.
+
+    Feature columns need to occasionally be sortable, for example when used as
+    keys in a features dictionary passed to a layer.
+
+    In CPython, `__lt__` must be defined for all objects in the
+    sequence being sorted. If any objects do not have an `__lt__` compatible
+    with feature column objects (such as strings), then CPython will fall back
+    to using the `__gt__` method below.
+    https://docs.python.org/3/library/stdtypes.html#list.sort
+
+    Args:
+      other: The other object to compare to.
+
+    Returns:
+      True if the string representation of this object is lexicographically less
+      than the string representation of `other`. For FeatureColumn objects,
+      this looks like "<__main__.FeatureColumn object at 0xa>".
+    """
+    return str(self) < str(other)
+
+  def __gt__(self, other):
+    """Allows feature columns to be sorted in Python 3 as they are in Python 2.
+
+    Feature columns need to occasionally be sortable, for example when used as
+    keys in a features dictionary passed to a layer.
+
+    `__gt__` is called when the "other" object being compared during the sort
+    does not have `__lt__` defined.
+    Example:
+    ```
+    # __lt__ only class
+    class A():
+      def __lt__(self, other): return str(self) < str(other)
+
+    a = A()
+    a < "b" # True
+    "0" < a # Error
+
+    # __lt__ and __gt__ class
+    class B():
+      def __lt__(self, other): return str(self) < str(other)
+      def __gt__(self, other): return str(self) > str(other)
+
+    b = B()
+    b < "c" # True
+    "0" < b # True
+    ```
+
+
+    Args:
+      other: The other object to compare to.
+
+    Returns:
+      True if the string representation of this object is lexicographically
+      greater than the string representation of `other`. For FeatureColumn
+      objects, this looks like "<__main__.FeatureColumn object at 0xa>".
+    """
+    return str(self) > str(other)
+
   @property
   def _var_scope_name(self):
     """Returns string. Used for variable_scope. Defaults to self.name."""
@@ -1912,7 +1988,8 @@ class _CategoricalColumn(_FeatureColumn):
   WARNING: Do not subclass this layer unless you know what you are doing:
   the API is subject to future changes.
 
-  A categorical feature typically handled with a `tf.SparseTensor` of IDs.
+  A categorical feature typically handled with a `tf.sparse.SparseTensor` of
+  IDs.
   """
 
   IdWeightPair = collections.namedtuple(  # pylint: disable=invalid-name
@@ -2147,7 +2224,7 @@ class _LazyBuilder(object):
     if rank is not None:
       if rank == 0:
         raise ValueError(
-            'Feature (key: {}) cannot have rank 0. Give: {}'.format(
+            'Feature (key: {}) cannot have rank 0. Given: {}'.format(
                 key, feature_tensor))
       return feature_tensor if rank != 1 else expand_dims(feature_tensor)
 
@@ -2240,7 +2317,7 @@ def _normalize_feature_columns(feature_columns):
   if isinstance(feature_columns, _FeatureColumn):
     feature_columns = [feature_columns]
 
-  if isinstance(feature_columns, collections.Iterator):
+  if isinstance(feature_columns, collections_abc.Iterator):
     feature_columns = list(feature_columns)
 
   if isinstance(feature_columns, dict):
@@ -2396,8 +2473,31 @@ class _EmbeddingColumn(
     collections.namedtuple(
         '_EmbeddingColumn',
         ('categorical_column', 'dimension', 'combiner', 'layer_creator',
-         'ckpt_to_load_from', 'tensor_name_in_ckpt', 'max_norm', 'trainable'))):
+         'ckpt_to_load_from', 'tensor_name_in_ckpt', 'max_norm', 'trainable',
+         'use_safe_embedding_lookup'))):
   """See `embedding_column`."""
+
+  def __new__(cls,
+              categorical_column,
+              dimension,
+              combiner,
+              layer_creator,
+              ckpt_to_load_from,
+              tensor_name_in_ckpt,
+              max_norm,
+              trainable,
+              use_safe_embedding_lookup=True):
+    return super(_EmbeddingColumn, cls).__new__(
+        cls,
+        categorical_column=categorical_column,
+        dimension=dimension,
+        combiner=combiner,
+        layer_creator=layer_creator,
+        ckpt_to_load_from=ckpt_to_load_from,
+        tensor_name_in_ckpt=tensor_name_in_ckpt,
+        max_norm=max_norm,
+        trainable=trainable,
+        use_safe_embedding_lookup=use_safe_embedding_lookup)
 
   @property
   def name(self):
@@ -2415,7 +2515,7 @@ class _EmbeddingColumn(
   @property
   def _variable_shape(self):
     if not hasattr(self, '_shape'):
-      self._shape = tensor_shape.vector(self.dimension)
+      self._shape = tensor_shape.TensorShape([self.dimension])
     return self._shape
 
   def _get_dense_tensor_internal(self,
@@ -2441,11 +2541,17 @@ class _EmbeddingColumn(
           self.tensor_name_in_ckpt: to_restore
       })
 
+    sparse_id_rank = tensor_shape.dimension_value(
+        sparse_ids.dense_shape.get_shape()[0])
+    embedding_lookup_sparse = embedding_ops.safe_embedding_lookup_sparse
+    if (not self.use_safe_embedding_lookup and sparse_id_rank is not None and
+        sparse_id_rank <= 2):
+      embedding_lookup_sparse = embedding_ops.embedding_lookup_sparse_v2
     # Return embedding lookup result.
-    return embedding_ops.safe_embedding_lookup_sparse(
-        embedding_weights=embedding_weights,
-        sparse_ids=sparse_ids,
-        sparse_weights=sparse_weights,
+    return embedding_lookup_sparse(
+        embedding_weights,
+        sparse_ids,
+        sparse_weights,
         combiner=self.combiner,
         name='%s_weights' % self.name,
         max_norm=self.max_norm)
@@ -2503,7 +2609,8 @@ class _SharedEmbeddingColumn(
         '_SharedEmbeddingColumn',
         ('categorical_column', 'dimension', 'combiner', 'initializer',
          'shared_embedding_collection_name', 'ckpt_to_load_from',
-         'tensor_name_in_ckpt', 'max_norm', 'trainable'))):
+         'tensor_name_in_ckpt', 'max_norm', 'trainable',
+         'use_safe_embedding_lookup'))):
   """See `embedding_column`."""
 
   @property
@@ -2526,7 +2633,7 @@ class _SharedEmbeddingColumn(
   @property
   def _variable_shape(self):
     if not hasattr(self, '_shape'):
-      self._shape = tensor_shape.vector(self.dimension)
+      self._shape = tensor_shape.TensorShape([self.dimension])
     return self._shape
 
   def _get_dense_tensor_internal(self,
@@ -2584,11 +2691,17 @@ class _SharedEmbeddingColumn(
             self.tensor_name_in_ckpt: to_restore
         })
 
+      sparse_id_rank = tensor_shape.dimension_value(
+          sparse_ids.dense_shape.get_shape()[0])
+      embedding_lookup_sparse = embedding_ops.safe_embedding_lookup_sparse
+      if (not self.use_safe_embedding_lookup and sparse_id_rank is not None and
+          sparse_id_rank <= 2):
+        embedding_lookup_sparse = embedding_ops.embedding_lookup_sparse_v2
       # Return embedding lookup result.
-      return embedding_ops.safe_embedding_lookup_sparse(
-          embedding_weights=embedding_weights,
-          sparse_ids=sparse_ids,
-          sparse_weights=sparse_weights,
+      return embedding_lookup_sparse(
+          embedding_weights,
+          sparse_ids,
+          sparse_weights,
           combiner=self.combiner,
           name='%s_weights' % self.name,
           max_norm=self.max_norm)
@@ -2824,22 +2937,13 @@ class _IdentityCategoricalColumn(
       raise ValueError(
           'Invalid input, not integer. key: {} dtype: {}'.format(
               self.key, input_tensor.dtype))
-
-    values = math_ops.cast(input_tensor.values, dtypes.int64, name='values')
-    num_buckets = math_ops.cast(
-        self.num_buckets, dtypes.int64, name='num_buckets')
-    zero = math_ops.cast(0, dtypes.int64, name='zero')
-    if self.default_value is None:
-      # Fail if values are out-of-range.
-      assert_less = check_ops.assert_less(
-          values, num_buckets, data=(values, num_buckets),
-          name='assert_less_than_num_buckets')
-      assert_greater = check_ops.assert_greater_equal(
-          values, zero, data=(values,),
-          name='assert_greater_or_equal_0')
-      with ops.control_dependencies((assert_less, assert_greater)):
-        values = array_ops.identity(values)
-    else:
+    values = input_tensor.values
+    if input_tensor.values.dtype != dtypes.int64:
+      values = math_ops.cast(values, dtypes.int64, name='values')
+    if self.default_value is not None:
+      num_buckets = math_ops.cast(
+          self.num_buckets, dtypes.int64, name='num_buckets')
+      zero = math_ops.cast(0, dtypes.int64, name='zero')
       # Assign default for out-of-range values.
       values = array_ops.where(
           math_ops.logical_or(
@@ -2848,7 +2952,6 @@ class _IdentityCategoricalColumn(
               dims=array_ops.shape(values),
               value=math_ops.cast(self.default_value, dtypes.int64),
               name='default_values'), values)
-
     return sparse_tensor_lib.SparseTensor(
         indices=input_tensor.indices,
         values=values,

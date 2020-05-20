@@ -25,22 +25,22 @@ from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops.ragged import ragged_util
+from tensorflow.python.util import dispatch
 from tensorflow.python.util.tf_export import tf_export
 
 
 # For background on "segments" and "segment ids", see:
 # https://www.tensorflow.org/api_docs/python/tf/math#Segmentation
 @tf_export("ragged.row_splits_to_segment_ids")
+@dispatch.add_dispatch_support
 def row_splits_to_segment_ids(splits, name=None, out_type=None):
   """Generates the segmentation corresponding to a RaggedTensor `row_splits`.
 
   Returns an integer vector `segment_ids`, where `segment_ids[i] == j` if
   `splits[j] <= i < splits[j+1]`.  Example:
 
-  ```python
-  >>> ragged.row_splits_to_segment_ids([0, 3, 3, 5, 6, 9]).eval()
-  [ 0 0 0 2 2 3 4 4 4 ]
-  ```
+  >>> print(tf.ragged.row_splits_to_segment_ids([0, 3, 3, 5, 6, 9]))
+   tf.Tensor([0 0 0 2 2 3 4 4 4], shape=(9,), dtype=int64)
 
   Args:
     splits: A sorted 1-D integer Tensor.  `splits[0]` must be zero.
@@ -76,6 +76,7 @@ def row_splits_to_segment_ids(splits, name=None, out_type=None):
 # For background on "segments" and "segment ids", see:
 # https://www.tensorflow.org/api_docs/python/tf/math#Segmentation
 @tf_export("ragged.segment_ids_to_row_splits")
+@dispatch.add_dispatch_support
 def segment_ids_to_row_splits(segment_ids, num_segments=None,
                               out_type=None, name=None):
   """Generates the RaggedTensor `row_splits` corresponding to a segmentation.
@@ -83,10 +84,8 @@ def segment_ids_to_row_splits(segment_ids, num_segments=None,
   Returns an integer vector `splits`, where `splits[0] = 0` and
   `splits[i] = splits[i-1] + count(segment_ids==i)`.  Example:
 
-  ```python
-  >>> ragged.segment_ids_to_row_splits([0, 0, 0, 2, 2, 3, 4, 4, 4]).eval()
-  [ 0 3 3 5 6 9 ]
-  ```
+  >>> print(tf.ragged.segment_ids_to_row_splits([0, 0, 0, 2, 2, 3, 4, 4, 4]))
+  tf.Tensor([0 3 3 5 6 9], shape=(6,), dtype=int64)
 
   Args:
     segment_ids: A 1-D integer Tensor.

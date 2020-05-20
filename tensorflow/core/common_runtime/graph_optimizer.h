@@ -46,6 +46,18 @@ class GraphOptimizer {
     // If not null then only nodes for which cf_consider_fn returns true will be
     // considered for CF.
     NodePredicate cf_consider_fn = nullptr;
+
+    // If true, multi-device functions will be inlined if
+    // opts_.do_function_inlining() is true.
+    bool inline_multi_device_functions = false;
+
+    // If true, functions in implementation selection group will be inlined if
+    // opts_.do_function_inlining() is true.
+    bool inline_impl_selection_group_functions = false;
+
+    // If true all functions will be inlined with a single device function
+    // body placer strategy.
+    bool inline_with_single_device_body_placer = false;
   };
 
   explicit GraphOptimizer(const OptimizerOptions& opts);
@@ -66,7 +78,10 @@ class GraphOptimizer {
       const std::unordered_map<string, std::vector<PartialTensorShape>>*
           shape_map,
       const NodePredicate& cse_consider_fn = nullptr,
-      const NodePredicate& cf_consider_fn = nullptr);
+      const NodePredicate& cf_consider_fn = nullptr,
+      bool inline_multi_device_functions = false,
+      bool inline_impl_selection_group_functions = false,
+      bool inline_with_single_device_body_placer = false);
 
   const OptimizerOptions& options() { return opts_; }
 
@@ -75,6 +90,17 @@ class GraphOptimizer {
 
   TF_DISALLOW_COPY_AND_ASSIGN(GraphOptimizer);
 };
+
+// Applies graph rewrite optimization such as inlining, dead code
+// removal, etc.
+//
+// **g is a graph constructed based on the runtime library 'lib'.
+// OptimizeGraph mutates **g extensively and replaces '*g' with a
+// complete copy. Therefore, the caller should not keep any references
+// to nodes *g.
+void OptimizeGraph(FunctionLibraryRuntime* lib, std::unique_ptr<Graph>* g,
+                   const GraphOptimizer::Options& graph_optimizer_options);
+void OptimizeGraph(FunctionLibraryRuntime* lib, std::unique_ptr<Graph>* g);
 
 }  // end namespace tensorflow
 

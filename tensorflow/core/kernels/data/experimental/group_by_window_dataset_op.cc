@@ -15,6 +15,7 @@ limitations under the License.
 #include <map>
 
 #include "tensorflow/core/common_runtime/function.h"
+#include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
 #include "tensorflow/core/framework/dataset.h"
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -25,10 +26,9 @@ limitations under the License.
 
 namespace tensorflow {
 namespace data {
+namespace experimental {
 namespace {
 
-// See documentation in ../../ops/dataset_ops.cc for a high-level
-// description of the following op.
 class GroupByWindowDatasetOp : public UnaryDatasetOpKernel {
  public:
   explicit GroupByWindowDatasetOp(OpKernelConstruction* ctx)
@@ -107,6 +107,13 @@ class GroupByWindowDatasetOp : public UnaryDatasetOpKernel {
       return "GroupByWindowDatasetOp::Dataset";
     }
 
+    Status CheckExternalState() const override {
+      TF_RETURN_IF_ERROR(captured_key_func_->CheckExternalState());
+      TF_RETURN_IF_ERROR(captured_reduce_func_->CheckExternalState());
+      TF_RETURN_IF_ERROR(captured_window_size_func_->CheckExternalState());
+      return input_->CheckExternalState();
+    }
+
    protected:
     Status AsGraphDefInternal(SerializationContext* ctx,
                               DatasetGraphDefBuilder* b,
@@ -174,7 +181,7 @@ class GroupByWindowDatasetOp : public UnaryDatasetOpKernel {
 
       Status Initialize(IteratorContext* ctx) override {
         TF_RETURN_IF_ERROR(
-            dataset()->input_->MakeIterator(ctx, prefix(), &input_impl_));
+            dataset()->input_->MakeIterator(ctx, this, prefix(), &input_impl_));
         TF_RETURN_IF_ERROR(dataset()->captured_key_func_->Instantiate(
             ctx, &instantiated_key_func_));
         TF_RETURN_IF_ERROR(dataset()->captured_reduce_func_->Instantiate(
@@ -287,9 +294,16 @@ class GroupByWindowDatasetOp : public UnaryDatasetOpKernel {
         return model::MakeUnknownRatioNode(std::move(args));
       }
 
-      Status SaveInternal(IteratorStateWriter* writer) override {
+      Status SaveInternal(SerializationContext* ctx,
+                          IteratorStateWriter* writer) override {
+        TF_RETURN_IF_ERROR(ctx->HandleCheckExternalStateStatus(
+            dataset()->captured_key_func_->CheckExternalState()));
+        TF_RETURN_IF_ERROR(ctx->HandleCheckExternalStateStatus(
+            dataset()->captured_reduce_func_->CheckExternalState()));
+        TF_RETURN_IF_ERROR(ctx->HandleCheckExternalStateStatus(
+            dataset()->captured_window_size_func_->CheckExternalState()));
         mutex_lock l(mu_);
-        TF_RETURN_IF_ERROR(SaveInput(writer, input_impl_));
+        TF_RETURN_IF_ERROR(SaveInput(ctx, writer, input_impl_));
 
         if (end_of_input_) {
           TF_RETURN_IF_ERROR(
@@ -330,7 +344,7 @@ class GroupByWindowDatasetOp : public UnaryDatasetOpKernel {
         }
 
         if (current_group_iterator_) {
-          TF_RETURN_IF_ERROR(SaveInput(writer, current_group_iterator_));
+          TF_RETURN_IF_ERROR(SaveInput(ctx, writer, current_group_iterator_));
 
           // Saving current_key_
           TF_RETURN_IF_ERROR(
@@ -402,7 +416,7 @@ class GroupByWindowDatasetOp : public UnaryDatasetOpKernel {
      private:
       Status SaveGroup(IteratorStateWriter* writer, const string& name,
                        const std::vector<std::vector<Tensor>>& group)
-          EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+          TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
         TF_RETURN_IF_ERROR(
             writer->WriteScalar(strings::StrCat(name, "_size"), group.size()));
         for (int i = 0; i < group.size(); i++) {
@@ -418,7 +432,7 @@ class GroupByWindowDatasetOp : public UnaryDatasetOpKernel {
 
       Status RestoreGroup(IteratorStateReader* reader, const string& name,
                           std::vector<std::vector<Tensor>>* group)
-          EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+          TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
         int64 group_size;
         TF_RETURN_IF_ERROR(
             reader->ReadScalar(strings::StrCat(name, "_size"), &group_size));
@@ -437,7 +451,7 @@ class GroupByWindowDatasetOp : public UnaryDatasetOpKernel {
       }
 
       Status StartFlushingGroup(IteratorContext* ctx, int64 key)
-          EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+          TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
         DatasetBase* group_dataset;
         TF_RETURN_IF_ERROR(NewWindowDataset(
             groups_[key], dataset()->input_->output_dtypes(),
@@ -472,18 +486,19 @@ class GroupByWindowDatasetOp : public UnaryDatasetOpKernel {
 
         // Create an iterator for the dataset that was returned by `f`.
         return returned_dataset->MakeIterator(
-            ctx, strings::StrCat(prefix(), "::Reduce"),
+            ctx, this, strings::StrCat(prefix(), "::Reduce"),
             &current_group_iterator_);
       }
 
       mutex mu_;
-      std::unique_ptr<IteratorBase> input_impl_ GUARDED_BY(mu_);
+      std::unique_ptr<IteratorBase> input_impl_ TF_GUARDED_BY(mu_);
       // TODO(mrry): Optimize for dense key space if appropriate.
-      bool end_of_input_ GUARDED_BY(mu_) = false;
-      int64 current_key_ GUARDED_BY(mu_);
-      std::map<int64, std::vector<std::vector<Tensor>>> groups_ GUARDED_BY(mu_);
-      std::unique_ptr<IteratorBase> current_group_iterator_ GUARDED_BY(mu_);
-      std::map<int64, int64> window_sizes_ GUARDED_BY(mu_);
+      bool end_of_input_ TF_GUARDED_BY(mu_) = false;
+      int64 current_key_ TF_GUARDED_BY(mu_);
+      std::map<int64, std::vector<std::vector<Tensor>>> groups_
+          TF_GUARDED_BY(mu_);
+      std::unique_ptr<IteratorBase> current_group_iterator_ TF_GUARDED_BY(mu_);
+      std::map<int64, int64> window_sizes_ TF_GUARDED_BY(mu_);
       std::unique_ptr<InstantiatedCapturedFunction> instantiated_key_func_;
       std::unique_ptr<InstantiatedCapturedFunction> instantiated_reduce_func_;
       std::unique_ptr<InstantiatedCapturedFunction>
@@ -505,10 +520,16 @@ class GroupByWindowDatasetOp : public UnaryDatasetOpKernel {
   std::vector<PartialTensorShape> output_shapes_;
 };
 
+REGISTER_KERNEL_BUILDER(Name("GroupByWindowDataset").Device(DEVICE_CPU),
+                        GroupByWindowDatasetOp);
 REGISTER_KERNEL_BUILDER(
     Name("ExperimentalGroupByWindowDataset").Device(DEVICE_CPU),
     GroupByWindowDatasetOp);
 
+REGISTER_INPUT_COLOCATION_EXEMPTION("GroupByWindowDataset");
+REGISTER_INPUT_COLOCATION_EXEMPTION("ExperimentalGroupByWindowDataset");
+
 }  // namespace
+}  // namespace experimental
 }  // namespace data
 }  // namespace tensorflow

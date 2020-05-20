@@ -58,9 +58,9 @@ class MakePaddingFromZerosConcat : public NodeTransformation {
             absl::any_cast<const ConcatAttributes&>(node->operation.attributes);
         PadAttributes pad_attr;
         pad_attr.type = PaddingContentType::ZEROS;
-        pad_attr.appended = HWC(0, 0, 0);
-        pad_attr.prepended = HWC(0, 0, 0);
-        HWC* p = first ? &pad_attr.prepended : &pad_attr.appended;
+        pad_attr.appended = BHWC(0, 0, 0, 0);
+        pad_attr.prepended = BHWC(0, 0, 0, 0);
+        BHWC* p = first ? &pad_attr.prepended : &pad_attr.appended;
         switch (concat_attr.axis) {
           case Axis::HEIGHT:
             p->h = input->tensor.shape.h;
@@ -76,10 +76,10 @@ class MakePaddingFromZerosConcat : public NodeTransformation {
                     "Padding for concat axis is unsupported: " +
                         ToString(concat_attr.axis)};
         }
-        Status status = RemovePrecedingNode(graph, dep, node);
+        absl::Status status = RemovePrecedingNode(graph, dep, node);
         if (!status.ok()) {
-          return {TransformStatus::INVALID,
-                  "Unable to remove const node: " + status.error_message()};
+          return {TransformStatus::INVALID, "Unable to remove const node: " +
+                                                std::string(status.message())};
         }
         node->operation.attributes = pad_attr;
         node->operation.type = ToString(OperationType::PAD);
